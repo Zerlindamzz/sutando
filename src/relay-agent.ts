@@ -81,7 +81,10 @@ export function createVoiceTaskStore(path: string, now: () => number = Date.now)
 		},
 		set(taskId: string, delivery: Delivery): void {
 			// A confirmed delivery is never downgraded by a later, weaker one.
-			update(taskId, (row) => (row.delivery === 'spoken' && delivery !== 'spoken' ? null : { ...row, delivery }));
+			const deliver = (row: VoiceTaskRecord) => (row.delivery === 'spoken' && delivery !== 'spoken' ? null : { ...row, delivery });
+			update(taskId, deliver);
+			// The tasks answered in this one's result reached the user with it, whichever way it went.
+			for (const [id, row] of Object.entries(read())) if (row.answeredBy === taskId) update(id, deliver);
 		},
 		noteReplay(taskId: string): void {
 			update(taskId, (row) => ({ ...row, replays: (row.replays ?? 0) + 1 }));
@@ -92,7 +95,9 @@ export function createVoiceTaskStore(path: string, now: () => number = Date.now)
 		/** The core answered `taskId` in `target`'s result. */
 		setAnsweredBy(taskId: string, target: string): void {
 			if (taskId === target) return;
-			update(taskId, (row) => ({ ...row, answeredBy: target }));
+			// The answering result may already have been handed over: this task went with it.
+			const reached = read()[target]?.delivery;
+			update(taskId, (row) => ({ ...row, answeredBy: target, ...(reached && row.delivery !== 'spoken' ? { delivery: reached } : {}) }));
 		},
 		/** The user corrected `taskId` with `by`. */
 		setSupersededBy(taskId: string, by: string): void {
@@ -158,6 +163,8 @@ export interface ResultItem {
 	alsoFor?: string[];
 	/** A message with no task of its own that speaks for these voice tasks (see coveredTasks). */
 	covers?: string[];
+	/** A status notice about this task (not its result): not said once it is no longer true. */
+	about?: string;
 }
 
 /** The text handed to the model for one result: the requests it answers, the result, any note. */

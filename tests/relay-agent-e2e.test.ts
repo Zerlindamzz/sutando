@@ -14,7 +14,7 @@ mkdirSync(join(TMP, 'tasks'), { recursive: true });
 mkdirSync(join(TMP, 'results'), { recursive: true });
 
 const { wireDurableChannels } = await import('../src/live-agent-runtime.js');
-const { RelayAgent } = await import('../src/relay-agent.js');
+const { RelayAgent, createVoiceTaskStore, NOT_PICKED_MS } = await import('../src/relay-agent.js');
 const { voiceTaskStore, setVoiceTaskEndedListener } = await import('../src/task-bridge.js');
 
 after(() => rmSync(TMP, { recursive: true, force: true }));
@@ -74,6 +74,7 @@ describe('relay agent end to end', () => {
 		const ids = ['5308', '5309', '5310'].map((pr) => voiceTask(`check PR ${pr}`));
 		writeFileSync(join(TMP, 'results', `${ids[1]}.txt`), `[deduped: ${ids[0]}]`);
 		writeFileSync(join(TMP, 'results', `${ids[2]}.txt`), `[deduped: ${ids[0]}]`);
+		await until(() => ids.slice(1).every((id) => voiceTaskStore.get(id)?.answeredBy === ids[0]));
 		writeFileSync(join(TMP, 'results', `${ids[0]}.txt`), 'All three: 5308 merged; 5309 ready; 5310 blocked.');
 		const named = () => ['5308', '5309', '5310'].filter((pr) => sent.join('\n').includes(`"check PR ${pr}"`));
 		await until(() => named().length === 3 && ids.every(heard), 15_000);
@@ -188,5 +189,66 @@ describe('relay agent end to end', () => {
 		for (const c of calls) assert.match(await c, /delivered to the user separately/, 'their calls end without saying them');
 		await tick(800);
 		assert.ok(!sent.slice(before).some((t) => /PR 5302 detail|PR 5229 detail/.test(t)), 'not said again');
+	});
+
+	it('the core answers three requests in one result and marks the other two deduped while it waits its turn: said once, all three named, nothing handed over again', async () => {
+		const [a, b, c] = ['5302', '5229', '5167'].map((pr) => voiceTask(`check PR ${pr}`));
+		const calls = [a, b, c].map((id) => { submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true }; return relay.invoke('Execute tool: work', {}); });
+		await tick(0);
+		const before = sent.length;
+		// The user keeps talking, so the result waits in the queue while the markers land.
+		const talking = setInterval(() => session.emit('speech.user_started'), 50);
+		writeFileSync(join(TMP, 'results', `${a}.txt`), 'Three PRs: 5302 waits for review; 5229 needs a rebase; 5167 waits for you.');
+		await until(() => !existsSync(join(TMP, 'results', `${a}.txt`)) || sent.length > before, 3_000);
+		writeFileSync(join(TMP, 'results', `${b}.txt`), `[deduped: ${a}]`);
+		writeFileSync(join(TMP, 'results', `${c}.txt`), `[deduped: ${a}]`);
+		await until(() => [b, c].every((id) => voiceTaskStore.get(id)?.answeredBy === a));
+		clearInterval(talking);
+		const said = await calls[0];
+		for (const pr of ['5302', '5229', '5167']) assert.ok(said.includes(`"check PR ${pr}"`), `request ${pr} named to the model`);
+		for (const call of calls.slice(1)) assert.match(await call, /answered_together/);
+		session.emit('turn.start');
+		session.emit('response.first_audio');
+		session.emit('turn.end', { turnId: 't22' } as never);
+		for (const id of [a, b, c]) assert.equal(voiceTaskStore.get(id)?.delivery, 'spoken');
+		await tick(1_200); // reconcile passes
+		assert.equal(sent.length, before, 'nothing handed over again');
+	});
+
+	it('the deduped markers land after the combined result was said: the two inherit it and are not handed over again', async () => {
+		const [a, b] = ['6302', '6229'].map((pr) => voiceTask(`check PR ${pr}`));
+		const calls = [a, b].map((id) => { submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true }; return relay.invoke('Execute tool: work', {}); });
+		await tick(0);
+		const before = sent.length;
+		writeFileSync(join(TMP, 'results', `${a}.txt`), 'Both PRs: 6302 waits; 6229 needs a rebase.');
+		assert.match(await calls[0], /Both PRs/);
+		session.emit('turn.start');
+		session.emit('response.first_audio');
+		session.emit('turn.end', { turnId: 't23' } as never);
+		writeFileSync(join(TMP, 'results', `${b}.txt`), `[deduped: ${a}]`);
+		assert.match(await calls[1], /delivered to the user separately/, 'its call ends with nothing more to say');
+		assert.equal(voiceTaskStore.get(b)?.delivery, 'spoken');
+		await tick(1_200);
+		assert.equal(sent.length, before, 'nothing handed over again');
+	});
+
+	it('a "not picked up" notice still waiting its turn is dropped once the task has been answered', async () => {
+		const id = `task-19000${String(++seq).padStart(8, '0')}`;
+		writeFileSync(join(TMP, 'tasks', `${id}.txt`), `id: ${id}\nsource: voice\ntask: is the fish good\n`);
+		createVoiceTaskStore(join(TMP, 'state', 'voice-tasks.json'), () => Date.now() - NOT_PICKED_MS - 60_000).add(id, 'is the fish good');
+		submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true };
+		const call = relay.invoke('Execute tool: work', {});
+		await tick(0);
+		const before = sent.length;
+		// The user keeps talking, so nothing queued is handed over yet.
+		const talking = setInterval(() => session.emit('speech.user_started'), 50);
+		await until(() => !!voiceTaskStore.get(id)?.notPickedNoticed, 3_000);
+		assert.ok(voiceTaskStore.get(id)?.notPickedNoticed, 'the notice is queued');
+		writeFileSync(join(TMP, 'results', `${id}.txt`), 'The fish is a safe choice.');
+		await tick(400);
+		clearInterval(talking);
+		assert.match(await call, /safe choice/, 'the answer goes back through its call');
+		await tick(400);
+		assert.ok(!sent.slice(before).some((t) => t.includes('has not been picked up')), 'the stale notice is not said');
 	});
 });

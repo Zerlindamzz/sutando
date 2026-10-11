@@ -589,7 +589,13 @@ function _hasLiveOfflineCopy(taskId: string): boolean {
 }
 
 /** Delivers an owed result or notice to the user (the relay agent's queue). */
-export type RelayDeliver = (text: string, note: string | undefined, meta: { taskId?: string; framed?: boolean }) => void;
+export type RelayDeliver = (text: string, note: string | undefined, meta: { taskId?: string; framed?: boolean; about?: string }) => void;
+
+/** The "not picked up" notice for this task still holds: still queued, and nothing about it reached the user. */
+export function notPickedStillTrue(taskId: string): boolean {
+	const row = voiceTaskStore.get(taskId);
+	return !row?.delivery && !row?.supersededBy && !row?.cancelRequested && voiceTaskState(taskId) === 'queued';
+}
 
 /**
  * The relay agent's reconcile pass: for every recent voice task, compare what the core did with
@@ -622,7 +628,7 @@ export function reconcileVoiceTasks(deliver: RelayDeliver, isInFlight: (taskId: 
 			const minutes = Math.floor((now - (row.submittedAt ?? now)) / 60000);
 			console.log(`${ts()} [RelayAgent] ${id}: not picked up after ${minutes}m; telling the user`);
 			voiceTaskStore.noteNotPicked(id);
-			deliver(framedSystem(`The user's task "${(row.text ?? '').slice(0, 80).replace(/"/g, "'")}" has not been picked up by the core after ${minutes} minutes. It is still queued; the core may be busy or down. Tell the user in one sentence.`), undefined, { framed: true });
+			deliver(framedSystem(`The user's task "${(row.text ?? '').slice(0, 80).replace(/"/g, "'")}" has not been picked up by the core after ${minutes} minutes. It is still queued; the core may be busy or down. Tell the user in one sentence.`), undefined, { framed: true, about: id });
 		}
 	}
 }
@@ -1707,6 +1713,9 @@ export function startResultWatcher(onResult: ResultListener, isClientConnected: 
 					if (answeredIn && voiceTaskStore.get(taskId)) {
 						voiceTaskStore.setAnsweredBy(taskId, answeredIn);
 						console.log(`${ts()} [RelayAgent] ${taskId}: answered in ${answeredIn}`);
+						// That result already reached the model: this task's call has nothing more coming.
+						const went = voiceTaskStore.get(taskId)?.delivery;
+						if (went === 'spoken' || went === 'injected') _onVoiceTaskEnded?.(taskId, 'delivered_separately');
 					}
 					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
 					_deliveredResults.add(file);

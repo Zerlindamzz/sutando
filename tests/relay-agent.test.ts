@@ -316,7 +316,7 @@ describe('reconcile pass (task-bridge, temp workspace)', () => {
 		assert.equal(got.filter((t) => t.includes('PR 9')).length, 1, 'once the copy is gone, it is owed');
 	});
 
-	it('a task the core answered in another task\'s result is owed that result, labelled for it', () => {
+	it('a task the core answered in another task\'s result owes nothing once that result was heard, also when the link came after', () => {
 		const a = `task-${1_800_000_900_000 + ++seq}`;
 		const b = `task-${1_800_000_900_000 + ++seq}`;
 		writeFileSync(join(TMP, 'tasks', 'archive', MONTH, `${a}.txt`), `id: ${a}\nsource: voice\ntask: check PR 5308\n`);
@@ -325,18 +325,31 @@ describe('reconcile pass (task-bridge, temp workspace)', () => {
 		writeFileSync(join(TMP, 'results', 'archive', MONTH, `${b}.txt`), `[deduped: ${a}]`);
 		voiceTaskStore.add(a, 'check PR 5308');
 		voiceTaskStore.add(b, 'check PR 5309');
-		voiceTaskStore.set(a, 'spoken');      // handed over before the dedup link existed, naming only 5308
+		voiceTaskStore.set(a, 'spoken');      // said before the core marked b deduped into it
 		voiceTaskStore.setAnsweredBy(b, a);
+		assert.equal(voiceTaskStore.get(b)?.delivery, 'spoken', 'b reached the user with a');
 		const got: Array<{ text: string; taskId?: string }> = [];
 		reconcileVoiceTasks((text, _note, meta) => got.push({ text, taskId: meta.taskId }), () => false);
-		const owed = got.filter((g) => g.taskId === b);
-		assert.equal(owed.length, 1);
-		assert.match(owed[0].text, /5309 ready/);
-		assert.equal(got.filter((g) => g.taskId === a).length, 0, 'the answering task itself was heard');
-		voiceTaskStore.set(b, 'spoken');
-		got.length = 0;
+		assert.equal(got.filter((g) => g.taskId === a || g.taskId === b).length, 0, 'neither is handed over again');
+	});
+
+	it('a task answered in another task\'s result that went to the DM is owed that result, labelled for it', () => {
+		const a = `task-${1_800_000_900_000 + ++seq}`;
+		const b = `task-${1_800_000_900_000 + ++seq}`;
+		writeFileSync(join(TMP, 'tasks', 'archive', MONTH, `${a}.txt`), `id: ${a}\nsource: voice\ntask: check PR 5318\n`);
+		writeFileSync(join(TMP, 'tasks', 'archive', MONTH, `${b}.txt`), `id: ${b}\nsource: voice\ntask: check PR 5319\n`);
+		writeFileSync(join(TMP, 'results', 'archive', MONTH, `${a}.txt`), 'Both: 5318 merged, 5319 ready.');
+		writeFileSync(join(TMP, 'results', 'archive', MONTH, `${b}.txt`), `[deduped: ${a}]`);
+		voiceTaskStore.add(a, 'check PR 5318');
+		voiceTaskStore.add(b, 'check PR 5319');
+		voiceTaskStore.setAnsweredBy(b, a);
+		voiceTaskStore.set(a, 'dm');
+		assert.equal(voiceTaskStore.get(b)?.delivery, 'dm', 'b went where a went');
+		const got: Array<{ text: string; taskId?: string }> = [];
 		reconcileVoiceTasks((text, _note, meta) => got.push({ text, taskId: meta.taskId }), () => false);
-		assert.equal(got.filter((g) => g.taskId === b).length, 0, 'heard now: owes nothing');
+		assert.ok(got.some((g) => g.taskId === b && /5319 ready/.test(g.text)));
+		voiceTaskStore.set(a, 'spoken');
+		assert.equal(voiceTaskStore.get(b)?.delivery, 'spoken', 'heard with a');
 	});
 
 	it('status rows and the count ahead come from the table: a health check in tasks/ is not one of the user\'s', () => {
@@ -364,7 +377,7 @@ describe('voice runs every work call through the relay agent', () => {
 		assert.match(voice, /subagentConfigs: \{ work: relayAgentSubagentConfig\(relayAgent\) \},/);
 		assert.match(voice, /wireDurableChannels\(session, \{ [^}]*relay: relayAgent \}\);/);
 		const runtime = readFileSync(join(import.meta.dirname ?? '.', '..', 'src/live-agent-runtime.ts'), 'utf-8');
-		assert.match(runtime, /if \(!opts\.relay\.offerResult\(item\)\) return false;/);
+		assert.match(runtime, /if \(!opts\.relay\.offerResult\(current\(item\)\)\) return false;/);
 	});
 });
 

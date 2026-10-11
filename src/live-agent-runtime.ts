@@ -21,7 +21,7 @@ import { injectText } from './browser-tools.js';
 import { meetingHoldsModel } from './meeting-input-hold.js';
 import { frameContextDrop, frameNoteViewMetadata, frameNoteViewFull } from './inject-framing.js';
 import { deliverWithRetry } from './inject-delivery.js';
-import { startResultWatcher, startContextDropWatcher, startNoteViewingWatcher, voiceTaskStore, reconcileVoiceTasks, forwardOfflineVoiceResult } from './task-bridge.js';
+import { startResultWatcher, startContextDropWatcher, startNoteViewingWatcher, voiceTaskStore, reconcileVoiceTasks, forwardOfflineVoiceResult, notPickedStillTrue } from './task-bridge.js';
 import { coveredTasks, createHandoffPacer, frameResult, resultIsMoot, type Handoff, type RelayAgent, type ResultItem } from './relay-agent.js';
 
 const WORKSPACE_DIR = resolveWorkspace();
@@ -156,12 +156,14 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 	const notice = (item: ResultItem) => canSpeak() && session.tryPublishSystemNotification(frameResult(item));
 	const ids = (item: ResultItem) =>
 		item.taskId ? [item.taskId, ...(item.alsoFor ?? [])] : (item.covers ?? []);
-	const moot = (item: ResultItem) => resultIsMoot(voiceTaskStore, ids(item));
+	const moot = (item: ResultItem) => (item.about ? !notPickedStillTrue(item.about) : resultIsMoot(voiceTaskStore, ids(item)));
 	// A result handed to the model as a system notice; it waits for a reconnect, then goes to the DM.
+	// Which tasks a result answers is read when it is handed: the core may mark one deduped into it after it landed.
+	const current = (item: ResultItem): ResultItem => (item.taskId ? { ...item, ...answering(item.taskId) } : item);
 	const viaNotice = (item: ResultItem): Handoff => ({
 		ids: ids(item), label: item.taskId ?? 'result', moot: () => moot(item),
-		hand: () => { if (!notice(item)) return false; record(item, 'injected'); return true; },
-		rehand: () => notice(item),
+		hand: () => { const now = current(item); if (!notice(now)) return false; record(now, 'injected'); return true; },
+		rehand: () => notice(current(item)),
 		fallback: () => retryThenDm(item),
 	});
 	const retryThenDm = (item: ResultItem) => {
@@ -226,11 +228,11 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 					return true;
 				},
 				hand: () => {
-					if (!opts.relay.offerResult(item)) return false;
+					if (!opts.relay.offerResult(current(item))) return false;
 					console.log(`${ts()} [RelayAgent] ${item.taskId}: result returned to its work call`);
 					return true;
 				},
-				rehand: () => notice(item),
+				rehand: () => notice(current(item)),
 				fallback: () => deliverElsewhere(item),
 			});
 			return;
@@ -253,7 +255,7 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 		try {
 			// A task's own waiting call goes first: a task answered in another's result still has one.
 			reconcileVoiceTasks(
-				(text, note, meta) => deliver({ text, note, taskId: meta.taskId, framed: meta.framed, ...answering(meta.taskId) }),
+				(text, note, meta) => deliver({ text, note, taskId: meta.taskId, framed: meta.framed, about: meta.about, ...answering(meta.taskId) }),
 				// Queued in the pacer: on its way, not lost.
 				(id) => pacer.has(id),
 			);
