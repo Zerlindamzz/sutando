@@ -13,7 +13,7 @@ process.env.SUTANDO_TEST_MODE = '1';
 const MONTH = new Date().toISOString().slice(0, 7);
 for (const d of ['tasks', 'results', join('tasks', 'archive', MONTH), join('results', 'archive', MONTH), join('state', 'activity')]) mkdirSync(join(TMP, d), { recursive: true });
 
-const { RelayAgent, createHandoffPacer, coveredTasks, requestMarks, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS } = await import('../src/relay-agent.js');
+const { RelayAgent, createHandoffPacer, coveredTasks, requestMarks, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS, SAY_WHICH_ONE, SAY_WHICH_EACH } = await import('../src/relay-agent.js');
 const { frameTaskResult } = await import('../src/inject-framing.js');
 const tb = await import('../src/task-bridge.js');
 const { _pendingTasksForTest, voiceTaskStore, MISSED_RESULT_NOTE, _forwardOfflineThenArchive, reconcileVoiceTasks, voiceTaskRows, voiceTasksAhead } = tb;
@@ -189,6 +189,12 @@ describe('a result that answers several requests (the core deduped them into it)
 		assert.equal(store.get('task-b')?.answeredBy, 'task-a');
 		assert.equal(store.get('task-a')?.answeredBy, undefined, 'never answered by itself');
 		assert.deepEqual(store.answeredBy('task-a').map(([id]) => id).sort(), ['task-b', 'task-c']);
+	});
+
+	it('the user hears which request a result answers, also when several arrive together', () => {
+		assert.ok(frameResult({ text: 'a cat', requests: ['draw a cat'] }).includes(SAY_WHICH_ONE));
+		assert.ok(frameResult({ text: 'All three.', requests: ['r1', 'r2', 'r3'] }).includes(SAY_WHICH_EACH));
+		assert.ok(!frameResult({ text: 'a cat' }).includes(SAY_WHICH_ONE), 'nothing to name without a request');
 	});
 
 	it('a result names every request it answers', () => {

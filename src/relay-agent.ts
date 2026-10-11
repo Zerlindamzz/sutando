@@ -167,6 +167,10 @@ export interface ResultItem {
 	about?: string;
 }
 
+// Results can arrive minutes later and several in a row: the user hears which request each one answers.
+export const SAY_WHICH_ONE = 'Start by saying in a few words, in the user\'s language, which request this answers (e.g. "About the PR 5200 comment: …"), then the answer.';
+export const SAY_WHICH_EACH = 'Name each request, in a few words in the user\'s language, before its answer.';
+
 /** The text handed to the model for one result: the requests it answers, the result, any note. */
 export function frameResult(i: ResultItem): string {
 	const quote = (r: string) => `"${r.replace(/"/g, "'")}"`;
@@ -174,8 +178,8 @@ export function frameResult(i: ResultItem): string {
 	const asked = rs.length === 0
 		? ''
 		: rs.length === 1
-			? `${framedSystem(`This answers the user's request: ${quote(rs[0])}.`)}\n\n`
-			: `${framedSystem(`This answers ${rs.length} of the user's requests: ${rs.map(quote).join('; ')}. Cover each of them.`)}\n\n`;
+			? `${framedSystem(`This answers the user's request: ${quote(rs[0])}. ${SAY_WHICH_ONE}`)}\n\n`
+			: `${framedSystem(`This answers ${rs.length} of the user's requests: ${rs.map(quote).join('; ')}. Cover each of them. ${SAY_WHICH_EACH}`)}\n\n`;
 	return asked + (i.framed ? i.text : frameTaskResult(i.text)) + (i.note ? `\n\n${framedSystem(i.note)}` : '');
 }
 
