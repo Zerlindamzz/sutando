@@ -159,14 +159,20 @@ export function frameResult(i: ResultItem): string {
 		: rs.length === 1
 			? `${framedSystem(`This answers the user's request: ${quote(rs[0])}.`)}\n\n`
 			: `${framedSystem(`This answers ${rs.length} of the user's requests: ${rs.map(quote).join('; ')}. Cover each of them.`)}\n\n`;
-	return asked + (i.framed ? i.text : frameTaskResult(i.text)) + (i.note ? `\n\n${framedSystem(i.note)}` : '');
+	return asked + (i.framed ? i.text : frameTaskResult(i.text)) + (i.note ? `\n\n${framedSystem(i.note)}` : '') + `\n\n${framedSystem(ANSWER_USER_FIRST)}`;
 }
+
+/** Said with every result: it comes in the middle of a conversation, which goes first. */
+export const ANSWER_USER_FIRST = 'If the user has said something you have not answered yet, answer that first, briefly, then give this result.';
 
 /** Said with a result handed over again because the model's answer to it was cut off. */
 export const CUT_OFF_NOTE = 'The user was cut off before hearing all of this result. Tell them again, briefly.';
 
 /** How long a handed-over result waits for the model's turn before the next one goes anyway. */
 export const HANDOFF_CONFIRM_MS = 60_000;
+
+/** How long a result waits for the model to answer what the user just said (noise can end a user turn no reply follows). */
+export const USER_REPLY_WAIT_MS = 8_000;
 
 /** One result on its way to the model. */
 export interface Handoff {
@@ -184,13 +190,22 @@ export interface Handoff {
 /**
  * Hands results to the model one at a time and confirms each from the model's next turn: a turn
  * that finishes records it spoken; one cut off hands it over once more. Two results landing at
- * once would otherwise reach the model together, and it may answer only one.
+ * once would otherwise reach the model together, and it may answer only one. A result also waits
+ * while the user speaks and until the model has answered them, so it never takes the user's turn.
  */
 export function createHandoffPacer(deps: {
 	markSpoken: (ids: string[]) => void;
 	confirmMs?: number;
+	userReplyWaitMs?: number;
+	now?: () => number;
 	log?: (msg: string) => void;
 }) {
+	const now = deps.now ?? Date.now;
+	let userSpeaking = false;
+	let userEndedAt: number | null = null;
+	let userTimer: ReturnType<typeof setTimeout> | null = null;
+	const userTurnOpen = () =>
+		userSpeaking || (userEndedAt !== null && now() - userEndedAt < (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS));
 	const queue: Handoff[] = [];
 	let current: { h: Handoff; started: boolean; retried: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
 	const busyWith = (ids: string[]) =>
@@ -209,6 +224,13 @@ export function createHandoffPacer(deps: {
 		return timer;
 	};
 	function pump(): void {
+		if (!current && queue.length && userTurnOpen()) {
+			if (!userSpeaking && userEndedAt !== null && !userTimer) {
+				userTimer = setTimeout(() => { userTimer = null; pump(); }, Math.max(0, userEndedAt + (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS) - now()));
+				userTimer.unref?.();
+			}
+			return;
+		}
 		while (!current && queue.length) {
 			const h = queue.shift()!;
 			if (!h.hand()) { h.fallback(); continue; }
@@ -222,10 +244,23 @@ export function createHandoffPacer(deps: {
 			queue.push(h);
 			pump();
 		},
+		onUserSpeechStarted(): void {
+			userSpeaking = true;
+		},
+		onUserSpeechEnded(): void {
+			userSpeaking = false;
+			userEndedAt = now();
+		},
 		onTurnStart(): void {
 			if (current) current.started = true;
 		},
 		onTurnEnd(interrupted: boolean): void {
+			// A finished model turn answered whatever the user had said.
+			if (!interrupted && !userSpeaking) {
+				userEndedAt = null;
+				if (userTimer) { clearTimeout(userTimer); userTimer = null; }
+				if (!current) pump();
+			}
 			if (!current?.started) return;
 			if (!interrupted) {
 				deps.markSpoken(current.h.ids);

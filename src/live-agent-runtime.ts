@@ -125,6 +125,8 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 	});
 	const interruptedTurns = new Set<string>();
 	session.eventBus.subscribe('turn.start', () => pacer.onTurnStart());
+	session.eventBus.subscribe('speech.user_started', () => pacer.onUserSpeechStarted());
+	session.eventBus.subscribe('speech.user_ended', () => pacer.onUserSpeechEnded());
 	session.eventBus.subscribe('turn.interrupted', (e: { turnId?: string }) => { if (e?.turnId) interruptedTurns.add(String(e.turnId)); });
 	session.eventBus.subscribe('turn.end', (e: { turnId?: string }) => {
 		pacer.onTurnEnd(!!e?.turnId && interruptedTurns.delete(String(e.turnId)));
