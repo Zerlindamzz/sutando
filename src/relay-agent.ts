@@ -162,6 +162,91 @@ export function frameResult(i: ResultItem): string {
 	return asked + (i.framed ? i.text : frameTaskResult(i.text)) + (i.note ? `\n\n${framedSystem(i.note)}` : '');
 }
 
+/** Said with a result handed over again because the model's answer to it was cut off. */
+export const CUT_OFF_NOTE = 'The user was cut off before hearing all of this result. Tell them again, briefly.';
+
+/** How long a handed-over result waits for the model's turn before the next one goes anyway. */
+export const HANDOFF_CONFIRM_MS = 60_000;
+
+/** One result on its way to the model. */
+export interface Handoff {
+	/** The tasks it answers: recorded spoken once the model has said it. */
+	ids: string[];
+	label: string;
+	/** Hands it to the model now (its waiting work call or a system notice). False when it cannot. */
+	hand(): boolean;
+	/** Hands it again after a cut-off answer. */
+	rehand(): boolean;
+	/** It could not be handed: deliver it another way. */
+	fallback(): void;
+}
+
+/**
+ * Hands results to the model one at a time and confirms each from the model's next turn: a turn
+ * that finishes records it spoken; one cut off hands it over once more. Two results landing at
+ * once would otherwise reach the model together, and it may answer only one.
+ */
+export function createHandoffPacer(deps: {
+	markSpoken: (ids: string[]) => void;
+	confirmMs?: number;
+	log?: (msg: string) => void;
+}) {
+	const queue: Handoff[] = [];
+	let current: { h: Handoff; started: boolean; retried: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
+	const busyWith = (ids: string[]) =>
+		[...(current ? [current.h] : []), ...queue].some((h) => h.ids.some((id) => ids.includes(id)));
+	const release = () => {
+		if (current) clearTimeout(current.timer);
+		current = null;
+		pump();
+	};
+	const arm = () => {
+		const timer = setTimeout(() => {
+			deps.log?.(`[RelayAgent] ${current?.h.label}: no turn after the hand-off; moving on`);
+			release();
+		}, deps.confirmMs ?? HANDOFF_CONFIRM_MS);
+		timer.unref?.();
+		return timer;
+	};
+	function pump(): void {
+		while (!current && queue.length) {
+			const h = queue.shift()!;
+			if (!h.hand()) { h.fallback(); continue; }
+			current = { h, started: false, retried: false, timer: arm() };
+		}
+	}
+	return {
+		/** Queue a result; one already queued or on its way for the same task is not queued twice. */
+		submit(h: Handoff): void {
+			if (h.ids.length && busyWith(h.ids)) return;
+			queue.push(h);
+			pump();
+		},
+		onTurnStart(): void {
+			if (current) current.started = true;
+		},
+		onTurnEnd(interrupted: boolean): void {
+			if (!current?.started) return;
+			if (!interrupted) {
+				deps.markSpoken(current.h.ids);
+				release();
+				return;
+			}
+			if (current.retried || !current.h.rehand()) {
+				deps.log?.(`[RelayAgent] ${current.h.label}: answer cut off again; leaving it`);
+				release();
+				return;
+			}
+			deps.log?.(`[RelayAgent] ${current.h.label}: answer cut off; handing it over again`);
+			clearTimeout(current.timer);
+			current = { ...current, started: false, retried: true, timer: arm() };
+		},
+		get pending(): number {
+			return queue.length + (current ? 1 : 0);
+		},
+	};
+}
+
 /** Submits one `work` call to the core: the tool's own execute, returning its status object. */
 export type SubmitWork = (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
 

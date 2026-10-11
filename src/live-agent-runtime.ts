@@ -22,7 +22,7 @@ import { meetingHoldsModel } from './meeting-input-hold.js';
 import { frameContextDrop, frameNoteViewMetadata, frameNoteViewFull } from './inject-framing.js';
 import { deliverWithRetry } from './inject-delivery.js';
 import { startResultWatcher, startContextDropWatcher, startNoteViewingWatcher, voiceTaskStore, reconcileVoiceTasks, forwardOfflineVoiceResult } from './task-bridge.js';
-import { frameResult, type RelayAgent, type ResultItem } from './relay-agent.js';
+import { CUT_OFF_NOTE, createHandoffPacer, frameResult, type Handoff, type RelayAgent, type ResultItem } from './relay-agent.js';
 
 const WORKSPACE_DIR = resolveWorkspace();
 
@@ -40,6 +40,8 @@ export interface DurableChannelOptions {
 	notReadyRetriesMs?: number[];
 	/** How often the relay agent reconciles the task table with the core. */
 	reconcileMs?: number;
+	/** How long a handed-over result waits for the model's turn before the next one goes. */
+	handoffConfirmMs?: number;
 	/** The `work` subagent, which owns the result queue. */
 	relay: RelayAgent;
 }
@@ -115,6 +117,18 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 	// A result no work call can carry (its call was cancelled, its connection replaced, or the agent
 	// restarted): a system notice when the session can speak, held through a meeting; else one DM copy.
 	const heldForMeeting: ResultItem[] = [];
+	// One result at a time, each confirmed by the model's next turn (spoken) or handed over again once.
+	const pacer = createHandoffPacer({
+		markSpoken: (spoken) => { for (const id of spoken) voiceTaskStore.set(id, 'spoken'); },
+		confirmMs: opts.handoffConfirmMs,
+		log: (m) => console.log(`${ts()} ${m}`),
+	});
+	const interruptedTurns = new Set<string>();
+	session.eventBus.subscribe('turn.start', () => pacer.onTurnStart());
+	session.eventBus.subscribe('turn.interrupted', (e: { turnId?: string }) => { if (e?.turnId) interruptedTurns.add(String(e.turnId)); });
+	session.eventBus.subscribe('turn.end', (e: { turnId?: string }) => {
+		pacer.onTurnEnd(!!e?.turnId && interruptedTurns.delete(String(e.turnId)));
+	});
 	let stuckSeq = 0;
 	let heldTimer: ReturnType<typeof setInterval> | null = null;
 	const record = (item: ResultItem, delivery: 'injected' | 'dm') => {
@@ -133,53 +147,75 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 			heldTimer.unref?.();
 			return;
 		}
+		pacer.submit(viaNotice(item));
+	};
+	const canSpeak = () => session.sessionManager.isActive && session.clientConnected;
+	const notice = (item: ResultItem) => canSpeak() && session.tryPublishSystemNotification(frameResult(item));
+	const ids = (item: ResultItem) => [item.taskId, ...(item.alsoFor ?? [])].filter((id): id is string => !!id);
+	// A result handed to the model as a system notice; it waits for a reconnect, then goes to the DM.
+	const viaNotice = (item: ResultItem): Handoff => ({
+		ids: ids(item), label: item.taskId ?? 'result',
+		hand: () => { if (!notice(item)) return false; record(item, 'injected'); return true; },
+		rehand: () => notice({ ...item, note: CUT_OFF_NOTE }),
+		fallback: () => retryThenDm(item),
+	});
+	const retryThenDm = (item: ResultItem) => {
 		deliverWithRetry({
 			attempt: () => {
-				if (!session.sessionManager.isActive || !session.clientConnected) return false;
-				if (!session.tryPublishSystemNotification(frameResult(item))) return false;
-				record(item, 'injected');
+				if (!canSpeak()) return false;
+				pacer.submit({ ...viaNotice(item), fallback: () => toDm(item) });
 				return true;
 			},
 			// A reconnect takes seconds; wait up to a minute for it before the DM.
 			delaysMs: [0, ...(opts.notReadyRetriesMs ?? Array(30).fill(2_000))],
-			onExhausted: () => {
-				const taskId = item.taskId;
-				// A voice task's result: one DM copy, which the drain speaks on reconnect if no bridge takes it.
-				if (taskId?.startsWith('task-')) {
-					if (voiceTaskStore.get(taskId)?.delivery === 'dm') return;
-					void forwardOfflineVoiceResult(taskId, item.text)
-						.then(() => record(item, 'dm'))
-						.catch((e) => console.error(`${ts()} [TaskBridge] offline forward failed for ${taskId}:`, e));
-					return;
-				}
-				// Stuck-voice fallback (Susan's PR #924 review, Q3): always also a DM, so a result is never
-				// silently lost; Cartesia stays a bonus path for a user watching the web client.
-				console.log(`${ts()} [TaskBridge] Voice not active after waiting — falling back to Discord DM${cartesiaApiKey && generateSpeech ? ' + Cartesia' : ''}`);
-				try {
-					// One file per result: two can fall back in the same millisecond.
-					const proactivePath = join(WORKSPACE_DIR, 'results', `proactive-voice-stuck-${Date.now()}-${++stuckSeq}.txt`);
-					writeFileSync(proactivePath, `🎤 Voice session was stuck — couldn't speak this. Task result:\n\n${item.text}`);
-				} catch (e) {
-					console.error(`${ts()} [TaskBridge] Failed to write stuck-voice Discord fallback:`, e);
-				}
-				if (cartesiaApiKey && generateSpeech) {
-					const truncated = (item.text.match(/^[\s\S]{0,500}[.!?]/)?.[0] || item.text.slice(0, 500)).trim();
-					generateSpeech(truncated, { category: 'result', label: 'task-result' }).then(audioPath => {
-						const relativeSrc = audioPath.startsWith(WORKSPACE_DIR)
-							? audioPath.slice(WORKSPACE_DIR.replace(/\/$/, '').length + 1)
-							: audioPath;
-						writeFileSync(statusPath('dynamic-content.json', WORKSPACE_DIR), JSON.stringify({
-							type: 'audio', src: relativeSrc, title: 'Task Complete',
-						}));
-						console.log(`${ts()} [CartesiaTTS] Audio generated: ${audioPath}`);
-					}).catch(err => console.error(`${ts()} [CartesiaTTS] ${err.message}`));
-				}
-			},
+			onExhausted: () => toDm(item),
 		});
 	};
+	const toDm = (item: ResultItem) => {
+		const taskId = item.taskId;
+		// A voice task's result: one DM copy, which the drain speaks on reconnect if no bridge takes it.
+		if (taskId?.startsWith('task-')) {
+			if (voiceTaskStore.get(taskId)?.delivery === 'dm') return;
+			void forwardOfflineVoiceResult(taskId, item.text)
+				.then(() => record(item, 'dm'))
+				.catch((e) => console.error(`${ts()} [TaskBridge] offline forward failed for ${taskId}:`, e));
+			return;
+		}
+		// Stuck-voice fallback (Susan's PR #924 review, Q3): always also a DM, so a result is never
+		// silently lost; Cartesia stays a bonus path for a user watching the web client.
+		console.log(`${ts()} [TaskBridge] Voice not active after waiting — falling back to Discord DM${cartesiaApiKey && generateSpeech ? ' + Cartesia' : ''}`);
+		try {
+			// One file per result: two can fall back in the same millisecond.
+			const proactivePath = join(WORKSPACE_DIR, 'results', `proactive-voice-stuck-${Date.now()}-${++stuckSeq}.txt`);
+			writeFileSync(proactivePath, `🎤 Voice session was stuck — couldn't speak this. Task result:\n\n${item.text}`);
+		} catch (e) {
+			console.error(`${ts()} [TaskBridge] Failed to write stuck-voice Discord fallback:`, e);
+		}
+		if (cartesiaApiKey && generateSpeech) {
+			const truncated = (item.text.match(/^[\s\S]{0,500}[.!?]/)?.[0] || item.text.slice(0, 500)).trim();
+			generateSpeech(truncated, { category: 'result', label: 'task-result' }).then(audioPath => {
+				const relativeSrc = audioPath.startsWith(WORKSPACE_DIR)
+					? audioPath.slice(WORKSPACE_DIR.replace(/\/$/, '').length + 1)
+					: audioPath;
+				writeFileSync(statusPath('dynamic-content.json', WORKSPACE_DIR), JSON.stringify({
+					type: 'audio', src: relativeSrc, title: 'Task Complete',
+				}));
+				console.log(`${ts()} [CartesiaTTS] Audio generated: ${audioPath}`);
+			}).catch(err => console.error(`${ts()} [CartesiaTTS] ${err.message}`));
+		}
+	};
 	const deliver = (item: ResultItem) => {
-		if (opts.relay.offerResult(item)) {
-			console.log(`${ts()} [RelayAgent] ${item.taskId}: result returned to its work call`);
+		if (item.taskId && opts.relay.isWaiting(item.taskId)) {
+			pacer.submit({
+				ids: ids(item), label: item.taskId,
+				hand: () => {
+					if (!opts.relay.offerResult(item)) return false;
+					console.log(`${ts()} [RelayAgent] ${item.taskId}: result returned to its work call`);
+					return true;
+				},
+				rehand: () => notice({ ...item, note: CUT_OFF_NOTE }),
+				fallback: () => deliverElsewhere(item),
+			});
 			return;
 		}
 		console.log(`${ts()} [TaskBridge] Delivering result to the user${item.note ? ' (with a delivery note)' : ''}`);

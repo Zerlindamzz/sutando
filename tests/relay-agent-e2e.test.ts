@@ -27,7 +27,7 @@ const until = async (done: () => boolean, ms = 10_000) => {
 const sent: string[] = [];
 const handlers: Record<string, Array<(e?: unknown) => void>> = {};
 const session = {
-	emit: (event: string) => { for (const h of handlers[event] ?? []) h({}); },
+	emit: (event: string, e: unknown = {}) => { for (const h of handlers[event] ?? []) h(e); },
 	eventBus: { subscribe: (event: string, h: (e?: unknown) => void) => { (handlers[event] ??= []).push(h); } },
 	getTranscriptionMode: () => 'agent',
 	sessionManager: { isActive: true },
@@ -43,7 +43,7 @@ let submitted: Record<string, unknown> = {};
 const relay = new RelayAgent({ submit: async () => submitted, store: voiceTaskStore });
 setVoiceTaskEndedListener((taskId, why) => { relay.endCall(taskId, why); });
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-wireDurableChannels(session as any, { relay, notReadyRetriesMs: [10, 10], reconcileMs: 300 });
+wireDurableChannels(session as any, { relay, notReadyRetriesMs: [10, 10], reconcileMs: 300, handoffConfirmMs: 200 });
 
 let seq = 0;
 /** A voice task the core is working on: its task file, and its row in the table. */
@@ -115,5 +115,23 @@ describe('relay agent end to end', () => {
 		assert.equal(voiceTaskStore.get(id)?.delivery, 'dm');
 		assert.equal(readdirSync(join(TMP, 'results')).filter((f) => f.startsWith(`proactive-result-${id}-`)).length, 1);
 		session.clientConnected = true;
+	});
+	it('two results landing in the same moment: both reach the model, the second after the model answered the first', async () => {
+		const [a, b] = ['5275', '5251'].map((pr) => voiceTask(`check PR ${pr}`));
+		const calls = [a, b].map((id) => { submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true }; return relay.invoke('Execute tool: work', {}); });
+		await tick(0);
+		writeFileSync(join(TMP, 'results', `${a}.txt`), 'PR 5275 is blocked on changes requested.');
+		writeFileSync(join(TMP, 'results', `${b}.txt`), 'PR 5251 is waiting for review.');
+		const first = await Promise.race([calls[0], tick(8_000).then(() => 'timed out')]);
+		assert.match(first, /PR 5275/);
+		const second = await Promise.race([calls[1], tick(80).then(() => 'not yet')]);
+		assert.equal(second, 'not yet', 'held while the model is answering the first');
+		session.emit('turn.start');
+		session.emit('turn.end', { turnId: 't1' } as never);
+		assert.match(await calls[1], /PR 5251/);
+		assert.equal(voiceTaskStore.get(a)?.delivery, 'spoken', 'the answered one is recorded spoken');
+		session.emit('turn.start');
+		session.emit('turn.end', { turnId: 't2' } as never);
+		assert.equal(voiceTaskStore.get(b)?.delivery, 'spoken');
 	});
 });

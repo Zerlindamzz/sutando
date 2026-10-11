@@ -13,7 +13,7 @@ process.env.SUTANDO_TEST_MODE = '1';
 const MONTH = new Date().toISOString().slice(0, 7);
 for (const d of ['tasks', 'results', join('tasks', 'archive', MONTH), join('results', 'archive', MONTH), join('state', 'activity')]) mkdirSync(join(TMP, d), { recursive: true });
 
-const { RelayAgent, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS } = await import('../src/relay-agent.js');
+const { RelayAgent, createHandoffPacer, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS } = await import('../src/relay-agent.js');
 const { frameTaskResult } = await import('../src/inject-framing.js');
 const tb = await import('../src/task-bridge.js');
 const { _pendingTasksForTest, voiceTaskStore, MISSED_RESULT_NOTE, _forwardOfflineThenArchive, reconcileVoiceTasks, voiceTaskRows, voiceTasksAhead } = tb;
@@ -364,7 +364,7 @@ describe('voice runs every work call through the relay agent', () => {
 		assert.match(voice, /subagentConfigs: \{ work: relayAgentSubagentConfig\(relayAgent\) \},/);
 		assert.match(voice, /wireDurableChannels\(session, \{ [^}]*relay: relayAgent \}\);/);
 		const runtime = readFileSync(join(import.meta.dirname ?? '.', '..', 'src/live-agent-runtime.ts'), 'utf-8');
-		assert.match(runtime, /if \(opts\.relay\.offerResult\(item\)\)/);
+		assert.match(runtime, /if \(!opts\.relay\.offerResult\(item\)\) return false;/);
 	});
 });
 
@@ -391,5 +391,71 @@ describe('every status answer comes from the one table', () => {
 		assert.match(out, /1 done but the user has not heard the result yet \("check PR 3509"\)/);
 		assert.match(out, /1 done and already told to the user \("check PR 5140"\)/);
 		assert.match(describeVoiceTasks([]), /no tasks/);
+	});
+});
+
+describe('hand-off pacer: one result at a time, confirmed by the model\'s turn', () => {
+	function pacer(confirmMs = 10_000) {
+		const spoken: string[][] = [];
+		const handed: string[] = [];
+		const p = createHandoffPacer({ markSpoken: (ids) => spoken.push(ids), confirmMs });
+		const h = (id: string, opts: { hand?: () => boolean; rehand?: () => boolean; fallback?: () => void } = {}) => ({
+			ids: [id], label: id,
+			hand: opts.hand ?? (() => { handed.push(id); return true; }),
+			rehand: opts.rehand ?? (() => { handed.push(`${id} again`); return true; }),
+			fallback: opts.fallback ?? (() => handed.push(`${id} elsewhere`)),
+		});
+		return { p, h, spoken, handed };
+	}
+
+	it('two results landing together: the second waits for the model\'s answer to the first', () => {
+		const t = pacer();
+		t.p.submit(t.h('a'));
+		t.p.submit(t.h('b'));
+		assert.deepEqual(t.handed, ['a']);
+		t.p.onTurnStart();
+		t.p.onTurnEnd(false);
+		assert.deepEqual(t.spoken, [['a']]);
+		assert.deepEqual(t.handed, ['a', 'b']);
+	});
+
+	it('an answer cut off is handed over once more; cut off again, it is left', () => {
+		const t = pacer();
+		t.p.submit(t.h('a'));
+		t.p.submit(t.h('b'));
+		t.p.onTurnStart();
+		t.p.onTurnEnd(true);
+		assert.deepEqual(t.handed, ['a', 'a again']);
+		t.p.onTurnStart();
+		t.p.onTurnEnd(true);
+		assert.deepEqual(t.spoken, [], 'never recorded spoken');
+		assert.deepEqual(t.handed, ['a', 'a again', 'b']);
+	});
+
+	it('a turn that ended before the hand-off does not confirm it', () => {
+		const t = pacer();
+		t.p.submit(t.h('a'));
+		t.p.onTurnEnd(false);
+		assert.deepEqual(t.spoken, []);
+		assert.equal(t.p.pending, 1);
+	});
+
+	it('no turn at all: the next result goes after the wait', async () => {
+		const t = pacer(20);
+		t.p.submit(t.h('a'));
+		t.p.submit(t.h('b'));
+		await tick(40);
+		assert.deepEqual(t.handed, ['a', 'b']);
+		assert.deepEqual(t.spoken, []);
+	});
+
+	it('the same task is not queued twice; one that cannot be handed goes another way', () => {
+		const t = pacer();
+		t.p.submit(t.h('a'));
+		t.p.submit(t.h('a'));
+		t.p.submit(t.h('c', { hand: () => false }));
+		t.p.onTurnStart();
+		t.p.onTurnEnd(false);
+		assert.deepEqual(t.handed, ['a', 'c elsewhere']);
 	});
 });
