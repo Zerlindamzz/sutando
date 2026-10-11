@@ -230,10 +230,13 @@ record_compaction_event "${TRANSCRIPT:-}" "${SUTANDO_HANDOFF_TRIGGER:-precompact
   git -C "$REPO" log --oneline -10 2>/dev/null
   echo ""
 
-  # Open PRs
-  echo "## Open PRs"
-  gh pr list --repo sonichi/sutando --state open --limit 5 2>/dev/null || echo "(couldn't fetch)"
-  echo ""
+  # Open PRs — git-attached (developer-mode) checkouts only; the packaged engine
+  # ships without .git, and its owner never asked about Sutando's own PRs.
+  if [ -e "$REPO/.git" ]; then
+    echo "## Open PRs"
+    gh pr list --repo sonichi/sutando --state open --limit 5 2>/dev/null || echo "(couldn't fetch)"
+    echo ""
+  fi
 
   # Pending questions — through the one reader (the skill's adapter); never the file.
   echo "## Pending Questions"
