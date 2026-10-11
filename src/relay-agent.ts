@@ -197,11 +197,14 @@ export function createHandoffPacer(deps: {
 }) {
 	const now = deps.now ?? Date.now;
 	let userSpeaking = false;
+	let userStartedAt = 0;
 	let userEndedAt: number | null = null;
 	let userTimer: ReturnType<typeof setTimeout> | null = null;
 	let spoke = false;
+	// A speech start with no end (a dropped event) must not hold results for good.
+	const speakingHold = () => userSpeaking && now() - userStartedAt < (deps.confirmMs ?? HANDOFF_CONFIRM_MS);
 	const userTurnOpen = () =>
-		userSpeaking || (userEndedAt !== null && now() - userEndedAt < (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS));
+		speakingHold() || (userEndedAt !== null && now() - userEndedAt < (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS));
 	const queue: Handoff[] = [];
 	let current: { h: Handoff; started: boolean; retried: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
 	const busyWith = (ids: string[]) =>
@@ -221,10 +224,13 @@ export function createHandoffPacer(deps: {
 	};
 	function pump(): void {
 		if (!current && queue.length && userTurnOpen()) {
-			if (!userSpeaking && userEndedAt !== null && !userTimer) {
-				userTimer = setTimeout(() => { userTimer = null; pump(); }, Math.max(0, userEndedAt + (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS) - now()));
-				userTimer.unref?.();
-			}
+			// Look again when the wait runs out; every user turn that ends starts it over.
+			const until = speakingHold()
+				? userStartedAt + (deps.confirmMs ?? HANDOFF_CONFIRM_MS)
+				: (userEndedAt ?? now()) + (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS);
+			if (userTimer) clearTimeout(userTimer);
+			userTimer = setTimeout(() => { userTimer = null; pump(); }, Math.max(0, until - now()));
+			userTimer.unref?.();
 			return;
 		}
 		while (!current && queue.length) {
@@ -242,10 +248,12 @@ export function createHandoffPacer(deps: {
 		},
 		onUserSpeechStarted(): void {
 			userSpeaking = true;
+			userStartedAt = now();
 		},
 		onUserSpeechEnded(): void {
 			userSpeaking = false;
 			userEndedAt = now();
+			if (!current) pump();
 		},
 		onTurnStart(): void {
 			spoke = false;

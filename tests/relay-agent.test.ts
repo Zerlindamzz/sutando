@@ -494,6 +494,32 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		assert.deepEqual(handed, ['a']);
 	});
 
+	it('the user keeps talking and every reply is cut off: the result goes once the user has been quiet for the wait', async () => {
+		const handed: string[] = [];
+		const p = createHandoffPacer({ markSpoken: () => {}, userReplyWaitMs: 30 });
+		p.onUserSpeechStarted();
+		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, rehand: () => true, fallback: () => {} });
+		p.onUserSpeechEnded();
+		await tick(10);
+		p.onTurnStart(); p.onModelAudio(); p.onUserSpeechStarted(); p.onTurnEnd(true); // the reply is cut off by more speech
+		await tick(40);
+		assert.deepEqual(handed, [], 'still speaking: waits');
+		p.onUserSpeechEnded();
+		await tick(10);
+		assert.deepEqual(handed, [], 'just stopped: the wait starts over');
+		await tick(40);
+		assert.deepEqual(handed, ['a'], 'quiet for the wait, no reply came: it goes');
+	});
+
+	it('a speech start whose end never arrives holds results only up to the hand-off wait', async () => {
+		const handed: string[] = [];
+		const p = createHandoffPacer({ markSpoken: () => {}, confirmMs: 30, userReplyWaitMs: 1000 });
+		p.onUserSpeechStarted();
+		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, rehand: () => true, fallback: () => {} });
+		await tick(50);
+		assert.deepEqual(handed, ['a']);
+	});
+
 	it('the same task is not queued twice; one that cannot be handed goes another way', () => {
 		const t = pacer();
 		t.p.submit(t.h('a'));
