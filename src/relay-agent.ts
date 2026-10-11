@@ -241,6 +241,10 @@ export function createHandoffPacer(deps: {
 			clearTimeout(current.timer);
 			current = { ...current, started: false, retried: true, timer: arm() };
 		},
+		/** Whether a result for this task is queued or on its way to the model. */
+		has(taskId: string): boolean {
+			return busyWith([taskId]);
+		},
 		get pending(): number {
 			return queue.length + (current ? 1 : 0);
 		},

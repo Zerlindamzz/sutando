@@ -134,4 +134,17 @@ describe('relay agent end to end', () => {
 		session.emit('turn.end', { turnId: 't2' } as never);
 		assert.equal(voiceTaskStore.get(b)?.delivery, 'spoken');
 	});
+	it('results waiting their turn are not replayed by reconcile (no log line, no replay counted)', async () => {
+		const [a, b] = ['7001', '7002'].map((pr) => voiceTask(`check PR ${pr}`));
+		const calls = [a, b].map((id) => { submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true }; return relay.invoke('Execute tool: work', {}); });
+		await tick(0);
+		writeFileSync(join(TMP, 'results', `${a}.txt`), 'PR 7001 status.');
+		writeFileSync(join(TMP, 'results', `${b}.txt`), 'PR 7002 status.');
+		await calls[0];
+		await tick(700); // two reconcile passes while b waits behind a
+		assert.equal(voiceTaskStore.get(b)?.replays ?? 0, 0, 'waiting is not a lost result');
+		session.emit('turn.start');
+		session.emit('turn.end', { turnId: 't9' } as never);
+		assert.match(await calls[1], /PR 7002/);
+	});
 });

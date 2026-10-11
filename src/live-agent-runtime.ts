@@ -234,7 +234,8 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 			// A task's own waiting call goes first: a task answered in another's result still has one.
 			reconcileVoiceTasks(
 				(text, note, meta) => deliver({ text, note, taskId: meta.taskId, framed: meta.framed, ...answering(meta.taskId) }),
-				() => false,
+				// Queued in the pacer: on its way, not lost.
+				(id) => pacer.has(id),
 			);
 		} catch (err) {
 			console.error(`${ts()} [RelayAgent] reconcile failed (will retry):`, err);
