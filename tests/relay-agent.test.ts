@@ -13,7 +13,7 @@ process.env.SUTANDO_TEST_MODE = '1';
 const MONTH = new Date().toISOString().slice(0, 7);
 for (const d of ['tasks', 'results', join('tasks', 'archive', MONTH), join('results', 'archive', MONTH), join('state', 'activity')]) mkdirSync(join(TMP, d), { recursive: true });
 
-const { RelayAgent, createHandoffPacer, coveredTasks, requestMarks, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS, SAY_WHICH_ONE, SAY_WHICH_EACH } = await import('../src/relay-agent.js');
+const { RelayAgent, createHandoffPacer, coveredTasks, requestMarks, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS, SAY_WHICH_ONE, SAY_WHICH_EACH, createSpeechGate } = await import('../src/relay-agent.js');
 const { frameTaskResult } = await import('../src/inject-framing.js');
 const tb = await import('../src/task-bridge.js');
 const { _pendingTasksForTest, voiceTaskStore, MISSED_RESULT_NOTE, _forwardOfflineThenArchive, reconcileVoiceTasks, voiceTaskRows, voiceTasksAhead } = tb;
@@ -125,6 +125,83 @@ describe('relay agent subagent: the work call returns its task\'s result', () =>
 		await tick(0);
 		await relay.dispose();
 		await assert.rejects(call, /disposed/);
+	});
+});
+
+describe('relay agent: a work call waits until the user has finished speaking', () => {
+	// Short times stand in for the real 1.5 s quiet and 30 s hold.
+	function agent(maxHoldMs = 2_000) {
+		const store = createVoiceTaskStore(join(TMP, `relay-speech-${Math.random()}.json`));
+		const speech = createSpeechGate({ quietMs: 60, maxHoldMs });
+		const submitted: Record<string, unknown>[] = [];
+		let n = 0;
+		const relay = new RelayAgent({
+			store,
+			speech,
+			submit: async (args) => { submitted.push(args); return { status: 'pending', taskId: `task-s${++n}`, queuedAhead: 0, watcherOnline: true, message: 'm' }; },
+		});
+		return { relay, speech, submitted };
+	}
+
+	it('a request cut off mid-sentence and the rest the user went on to say are submitted as one task', async () => {
+		// 2026-10-11 23:31: the model ended the user's turn at "Santander repository 最近一" and called work;
+		// the user was still talking and said the whole request again; two tasks were queued.
+		const { relay, speech, submitted } = agent();
+		speech.onUserSpeechStarted();
+		speech.onUserSpeechEnded(); // the provider ends the turn mid-sentence
+		const first = relay.invoke('w', { task: 'Check the activity in the Sutando repository for the last week.' });
+		await tick(10);
+		speech.onUserSpeechStarted(); // 150 ms later the user is still talking
+		await tick(100);
+		assert.equal(submitted.length, 0, 'nothing is submitted while the user speaks');
+		speech.onUserSpeechEnded();
+		await tick(20);
+		speech.onUserSpeechStarted(); // a short pause between phrases
+		await tick(40);
+		speech.onUserSpeechEnded();
+		await tick(20);
+		const second = relay.invoke('w', { task: 'Summarize the PRs merged in the Sutando repository during the last week.' });
+		assert.match(await first, /sent together with what they said next\. Say nothing about it/);
+		await tick(120);
+		assert.equal(submitted.length, 1, 'one task');
+		assert.match(String(submitted[0].task), /^Summarize the PRs merged/);
+		assert.match(String(submitted[0].task), /cut off mid-sentence and are sent with it: "Check the activity in the Sutando repository/);
+		assert.equal(relay.isWaiting('task-s1'), true, 'the later call waits for the result');
+		void second;
+	});
+
+	it('a request the user has finished is submitted once they have been quiet a moment', async () => {
+		const { relay, speech, submitted } = agent();
+		speech.onUserSpeechStarted();
+		speech.onUserSpeechEnded();
+		void relay.invoke('w', { task: 'check PR 5302' });
+		await tick(20);
+		assert.equal(submitted.length, 0, 'not before the quiet time');
+		await tick(80);
+		assert.deepEqual(submitted.map((a) => a.task), ['check PR 5302']);
+	});
+
+	it('two requests with a real pause between them stay two tasks', async () => {
+		const { relay, speech, submitted } = agent();
+		speech.onUserSpeechStarted();
+		speech.onUserSpeechEnded();
+		void relay.invoke('w', { task: 'check PR 5302' });
+		await tick(100);
+		speech.onUserSpeechStarted();
+		speech.onUserSpeechEnded();
+		void relay.invoke('w', { task: 'check PR 5229' });
+		await tick(100);
+		assert.deepEqual(submitted.map((a) => a.task), ['check PR 5302', 'check PR 5229']);
+	});
+
+	it('a speech start with no end does not hold a request for good', async () => {
+		const { relay, speech, submitted } = agent(150);
+		speech.onUserSpeechStarted();
+		void relay.invoke('w', { task: 'check PR 5302' });
+		await tick(60);
+		assert.equal(submitted.length, 0);
+		await tick(200);
+		assert.equal(submitted.length, 1);
 	});
 });
 

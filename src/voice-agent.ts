@@ -71,7 +71,7 @@ import { acquireVoiceLock, releaseOnExitUnlessFatal, resolveLockPython, voiceLoc
 import { recordToolCall } from './conversation-store.js';
 import { buildGreeting, buildInstructions, type VoiceConfigContext } from './voice-agent-config.js';
 import { wireDurableChannels, createSessionRecorder } from './live-agent-runtime.js';
-import { RelayAgent, relayAgentSubagentConfig } from './relay-agent.js';
+import { RelayAgent, relayAgentSubagentConfig, createSpeechGate } from './relay-agent.js';
 import {
 	classifyTransportClose,
 	fatalCloseForRecovery,
@@ -955,9 +955,12 @@ async function main() {
 	});
 
 	// The relay agent runs every `work` call as a bodhi subagent: submit, then return the core's result.
+	// A `work` call waits until the user has finished speaking (subscribed once the session exists).
+	const speechGate = createSpeechGate();
 	const relayAgent = new RelayAgent({
 		submit: submitWorkTask,
 		store: voiceTaskStore,
+		speech: speechGate,
 		notice: (text) => { sessionRef?.tryPublishSystemNotification(text); },
 		log: (msg) => console.log(`${ts()} ${msg}`),
 	});
@@ -1377,8 +1380,8 @@ async function main() {
 	// tells the bridge whether a transcription may still be landing (no stamp within
 	// 10 s = the model started this turn itself, so the task write does not wait).
 	let lastUserSpeechAt: number | undefined;
-	session.eventBus.subscribe('speech.user_started', () => { lastUserSpeechAt = Date.now(); });
-	session.eventBus.subscribe('speech.user_ended', () => { lastUserSpeechAt = Date.now(); });
+	session.eventBus.subscribe('speech.user_started', () => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechStarted(); });
+	session.eventBus.subscribe('speech.user_ended', () => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechEnded(); });
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const speechHost = session as any;
 	setVoiceTurnsProvider(() => ({

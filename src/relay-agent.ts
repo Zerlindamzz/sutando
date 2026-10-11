@@ -220,6 +220,53 @@ export const HANDOFF_CONFIRM_MS = 60_000;
 /** How long a result waits for the model to answer what the user just said (noise can end a user turn no reply follows). */
 export const USER_REPLY_WAIT_MS = 8_000;
 
+/** How long the user stays quiet before a `work` call is submitted: a pause mid-sentence is shorter. */
+export const QUIET_BEFORE_SUBMIT_MS = 1_500;
+
+/** A `work` call is never held longer than this, whatever the speech events say. */
+export const MAX_SUBMIT_HOLD_MS = 30_000;
+
+/**
+ * Whether the user has finished speaking. The model can end the user's turn mid-sentence (a short
+ * pause) and call `work` with half a request; the relay agent waits on this before it submits.
+ */
+export interface SpeechGate {
+	onUserSpeechStarted(): void;
+	onUserSpeechEnded(): void;
+	/** Resolves once the user has been quiet for the quiet time, or the hold limit or `signal` ends the wait. */
+	waitQuiet(signal?: AbortSignal): Promise<void>;
+}
+
+export function createSpeechGate(opts: { quietMs?: number; maxHoldMs?: number; now?: () => number } = {}): SpeechGate {
+	const now = opts.now ?? Date.now;
+	const quietMs = opts.quietMs ?? QUIET_BEFORE_SUBMIT_MS;
+	const maxHoldMs = opts.maxHoldMs ?? MAX_SUBMIT_HOLD_MS;
+	let speaking = false;
+	let endedAt: number | null = null;
+	return {
+		onUserSpeechStarted() { speaking = true; },
+		onUserSpeechEnded() { speaking = false; endedAt = now(); },
+		waitQuiet(signal) {
+			const since = now();
+			return new Promise<void>((resolve) => {
+				const look = () => {
+					const t = now();
+					if (signal?.aborted || t - since >= maxHoldMs) return resolve();
+					const quietFrom = speaking ? null : (endedAt ?? 0) + quietMs;
+					if (quietFrom !== null && t >= quietFrom) return resolve();
+					setTimeout(look, quietFrom === null ? 100 : Math.max(10, quietFrom - t));
+				};
+				look();
+			});
+		},
+	};
+}
+
+/** The request a cut-off call sent, joined to the one the user went on to say. */
+export function joinCutOffRequest(earlier: string, later: string): string {
+	return `${later}\n\n[The user's words just before this were cut off mid-sentence and are sent with it: "${earlier.replace(/"/g, "'")}". If they ask for something this does not cover, do that too.]`;
+}
+
 /** One result on its way to the model. */
 export interface Handoff {
 	/** The tasks it answers: recorded spoken once the model has said it. */
@@ -362,6 +409,8 @@ export interface RelayAgentDeps {
 	store: VoiceTaskStore;
 	/** Says a line to the model now (the queue position at submission). */
 	notice?: (text: string) => void;
+	/** Holds each call until the user has finished speaking. Without it, calls are submitted at once. */
+	speech?: SpeechGate;
 	log?: (msg: string) => void;
 }
 
@@ -371,7 +420,8 @@ interface Waiter {
 }
 
 /** How a waiting call ends without its result. bodhi reads a rejection out as a failure, so none rejects. */
-const ENDED: Record<'cancelled' | 'continuing' | 'delivered_separately', string> = {
+const ENDED: Record<'cancelled' | 'continuing' | 'delivered_separately' | 'continued_in_next', string> = {
+	continued_in_next: 'The user was not finished: this request was sent together with what they said next. Say nothing about it.',
 	cancelled: 'The user cancelled this task and was already told. Do not mention it again.',
 	continuing: 'The task is still running; its result will come in a separate message.',
 	delivered_separately: 'This task\'s result is delivered to the user separately. Say nothing about it now.',
@@ -385,10 +435,31 @@ const ENDED: Record<'cancelled' | 'continuing' | 'delivered_separately', string>
 export class RelayAgent implements PersistentSubagentInstance {
 	readonly key = 'relay-agent';
 	private readonly waiting = new Map<string, Waiter>();
+	/** The call waiting for the user to finish speaking, not yet submitted. */
+	private holding: { args: Record<string, unknown>; joined: boolean } | null = null;
 
 	constructor(private readonly deps: RelayAgentDeps) {}
 
 	async invoke(_task: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+		if (this.deps.speech) {
+			// A call made while an earlier one still waits for the user to finish: the user went on
+			// speaking, so the two are one request. The earlier call ends; this one carries both.
+			const earlier = this.holding;
+			if (earlier) {
+				earlier.joined = true;
+				args = {
+					...earlier.args,
+					...args,
+					task: joinCutOffRequest(String(earlier.args.task ?? ''), String(args.task ?? '')),
+				};
+				this.deps.log?.('[RelayAgent] the user went on speaking: the earlier request is sent with this one');
+			}
+			const mine = { args, joined: false };
+			this.holding = mine;
+			await this.deps.speech.waitQuiet(signal);
+			if (mine.joined) return framedSystem(ENDED.continued_in_next);
+			if (this.holding === mine) this.holding = null;
+		}
 		const submitted = await this.deps.submit(args);
 		const taskId = submitted.taskId;
 		if (submitted.status !== 'pending' || typeof taskId !== 'string') return JSON.stringify(submitted);
