@@ -159,14 +159,8 @@ export function frameResult(i: ResultItem): string {
 		: rs.length === 1
 			? `${framedSystem(`This answers the user's request: ${quote(rs[0])}.`)}\n\n`
 			: `${framedSystem(`This answers ${rs.length} of the user's requests: ${rs.map(quote).join('; ')}. Cover each of them.`)}\n\n`;
-	return asked + (i.framed ? i.text : frameTaskResult(i.text)) + (i.note ? `\n\n${framedSystem(i.note)}` : '') + `\n\n${framedSystem(ANSWER_USER_FIRST)}`;
+	return asked + (i.framed ? i.text : frameTaskResult(i.text)) + (i.note ? `\n\n${framedSystem(i.note)}` : '');
 }
-
-/** Said with every result: it comes in the middle of a conversation, which goes first. */
-export const ANSWER_USER_FIRST = 'If the user has said something you have not answered yet, answer that first, briefly, then give this result.';
-
-/** Said with a result handed over again because the model's answer to it was cut off. */
-export const CUT_OFF_NOTE = 'The user was cut off before hearing all of this result. Tell them again, briefly.';
 
 /** How long a handed-over result waits for the model's turn before the next one goes anyway. */
 export const HANDOFF_CONFIRM_MS = 60_000;
@@ -192,6 +186,7 @@ export interface Handoff {
  * that finishes records it spoken; one cut off hands it over once more. Two results landing at
  * once would otherwise reach the model together, and it may answer only one. A result also waits
  * while the user speaks and until the model has answered them, so it never takes the user's turn.
+ * Only a turn the model spoke in counts: a turn that was only a tool call answered no one.
  */
 export function createHandoffPacer(deps: {
 	markSpoken: (ids: string[]) => void;
@@ -204,6 +199,7 @@ export function createHandoffPacer(deps: {
 	let userSpeaking = false;
 	let userEndedAt: number | null = null;
 	let userTimer: ReturnType<typeof setTimeout> | null = null;
+	let spoke = false;
 	const userTurnOpen = () =>
 		userSpeaking || (userEndedAt !== null && now() - userEndedAt < (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS));
 	const queue: Handoff[] = [];
@@ -252,10 +248,19 @@ export function createHandoffPacer(deps: {
 			userEndedAt = now();
 		},
 		onTurnStart(): void {
+			spoke = false;
 			if (current) current.started = true;
 		},
+		/** The model's audio began in this turn. */
+		onModelAudio(): void {
+			spoke = true;
+		},
 		onTurnEnd(interrupted: boolean): void {
-			// A finished model turn answered whatever the user had said.
+			const spokeInTurn = spoke;
+			spoke = false;
+			// A silent turn (a tool call only) answered nothing and said nothing.
+			if (!spokeInTurn) return;
+			// A finished, spoken model turn answered whatever the user had said.
 			if (!interrupted && !userSpeaking) {
 				userEndedAt = null;
 				if (userTimer) { clearTimeout(userTimer); userTimer = null; }

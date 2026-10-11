@@ -13,7 +13,7 @@ process.env.SUTANDO_TEST_MODE = '1';
 const MONTH = new Date().toISOString().slice(0, 7);
 for (const d of ['tasks', 'results', join('tasks', 'archive', MONTH), join('results', 'archive', MONTH), join('state', 'activity')]) mkdirSync(join(TMP, d), { recursive: true });
 
-const { RelayAgent, createHandoffPacer, ANSWER_USER_FIRST, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS } = await import('../src/relay-agent.js');
+const { RelayAgent, createHandoffPacer, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS } = await import('../src/relay-agent.js');
 const { frameTaskResult } = await import('../src/inject-framing.js');
 const tb = await import('../src/task-bridge.js');
 const { _pendingTasksForTest, voiceTaskStore, MISSED_RESULT_NOTE, _forwardOfflineThenArchive, reconcileVoiceTasks, voiceTaskRows, voiceTasksAhead } = tb;
@@ -129,13 +129,12 @@ describe('relay agent subagent: the work call returns its task\'s result', () =>
 });
 
 describe('frameResult', () => {
-	it('one result is framed as before, then told to let the user\'s unanswered words go first; a note sits outside the result markers', () => {
-		assert.ok(frameResult({ text: 'x' }).startsWith(frameTaskResult('x')));
-		assert.ok(frameResult({ text: 'x' }).includes(ANSWER_USER_FIRST));
+	it('one result is framed exactly as before; a note sits outside the result markers', () => {
+		assert.equal(frameResult({ text: 'x' }), frameTaskResult('x'));
 		assert.match(frameResult({ text: 'x', note: 'n' }), /TASK_RESULT_END[\s\S]*n/);
 	});
 	it('a framed item is not wrapped as a task result', () => {
-		assert.ok(frameResult({ text: '[System: call done]', framed: true }).startsWith('[System: call done]\n\n'));
+		assert.equal(frameResult({ text: '[System: call done]', framed: true }), '[System: call done]');
 	});
 });
 
@@ -415,6 +414,7 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		t.p.submit(t.h('b'));
 		assert.deepEqual(t.handed, ['a']);
 		t.p.onTurnStart();
+		t.p.onModelAudio();
 		t.p.onTurnEnd(false);
 		assert.deepEqual(t.spoken, [['a']]);
 		assert.deepEqual(t.handed, ['a', 'b']);
@@ -425,9 +425,11 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		t.p.submit(t.h('a'));
 		t.p.submit(t.h('b'));
 		t.p.onTurnStart();
+		t.p.onModelAudio();
 		t.p.onTurnEnd(true);
 		assert.deepEqual(t.handed, ['a', 'a again']);
 		t.p.onTurnStart();
+		t.p.onModelAudio();
 		t.p.onTurnEnd(true);
 		assert.deepEqual(t.spoken, [], 'never recorded spoken');
 		assert.deepEqual(t.handed, ['a', 'a again', 'b']);
@@ -458,8 +460,26 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		t.p.onUserSpeechEnded();
 		assert.deepEqual(t.handed, [], 'not before the model has answered the user');
 		t.p.onTurnStart();
+		t.p.onModelAudio();
 		t.p.onTurnEnd(false);
 		assert.deepEqual(t.handed, ['a'], 'after the model answered');
+	});
+
+	it('a turn that was only a tool call answered no one: the result still waits, and is not recorded spoken', () => {
+		const t = pacer();
+		t.p.submit(t.h('a'));
+		t.p.onUserSpeechStarted();
+		t.p.onUserSpeechEnded();
+		t.p.submit(t.h('b'));
+		t.p.onTurnStart();
+		t.p.onTurnEnd(false); // the model only submitted a work task
+		assert.deepEqual(t.spoken, [], 'a silent turn said nothing');
+		assert.deepEqual(t.handed, ['a'], 'b still waits for a spoken answer to the user');
+		t.p.onTurnStart();
+		t.p.onModelAudio();
+		t.p.onTurnEnd(false); // the model spoke
+		assert.deepEqual(t.spoken, [['a']]);
+		assert.deepEqual(t.handed, ['a', 'b']);
 	});
 
 	it('the user spoke but no reply came (noise ending a turn): the result goes after the wait', async () => {
@@ -480,6 +500,7 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		t.p.submit(t.h('a'));
 		t.p.submit(t.h('c', { hand: () => false }));
 		t.p.onTurnStart();
+		t.p.onModelAudio();
 		t.p.onTurnEnd(false);
 		assert.deepEqual(t.handed, ['a', 'c elsewhere']);
 	});

@@ -127,10 +127,12 @@ describe('relay agent end to end', () => {
 		const second = await Promise.race([calls[1], tick(80).then(() => 'not yet')]);
 		assert.equal(second, 'not yet', 'held while the model is answering the first');
 		session.emit('turn.start');
+		session.emit('response.first_audio');
 		session.emit('turn.end', { turnId: 't1' } as never);
 		assert.match(await calls[1], /PR 5251/);
 		assert.equal(voiceTaskStore.get(a)?.delivery, 'spoken', 'the answered one is recorded spoken');
 		session.emit('turn.start');
+		session.emit('response.first_audio');
 		session.emit('turn.end', { turnId: 't2' } as never);
 		assert.equal(voiceTaskStore.get(b)?.delivery, 'spoken');
 	});
@@ -144,6 +146,7 @@ describe('relay agent end to end', () => {
 		await tick(700); // two reconcile passes while b waits behind a
 		assert.equal(voiceTaskStore.get(b)?.replays ?? 0, 0, 'waiting is not a lost result');
 		session.emit('turn.start');
+		session.emit('response.first_audio');
 		session.emit('turn.end', { turnId: 't9' } as never);
 		assert.match(await calls[1], /PR 7002/);
 	});

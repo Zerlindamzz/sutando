@@ -22,7 +22,7 @@ import { meetingHoldsModel } from './meeting-input-hold.js';
 import { frameContextDrop, frameNoteViewMetadata, frameNoteViewFull } from './inject-framing.js';
 import { deliverWithRetry } from './inject-delivery.js';
 import { startResultWatcher, startContextDropWatcher, startNoteViewingWatcher, voiceTaskStore, reconcileVoiceTasks, forwardOfflineVoiceResult } from './task-bridge.js';
-import { CUT_OFF_NOTE, createHandoffPacer, frameResult, type Handoff, type RelayAgent, type ResultItem } from './relay-agent.js';
+import { createHandoffPacer, frameResult, type Handoff, type RelayAgent, type ResultItem } from './relay-agent.js';
 
 const WORKSPACE_DIR = resolveWorkspace();
 
@@ -125,6 +125,7 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 	});
 	const interruptedTurns = new Set<string>();
 	session.eventBus.subscribe('turn.start', () => pacer.onTurnStart());
+	session.eventBus.subscribe('response.first_audio', () => pacer.onModelAudio());
 	session.eventBus.subscribe('speech.user_started', () => pacer.onUserSpeechStarted());
 	session.eventBus.subscribe('speech.user_ended', () => pacer.onUserSpeechEnded());
 	session.eventBus.subscribe('turn.interrupted', (e: { turnId?: string }) => { if (e?.turnId) interruptedTurns.add(String(e.turnId)); });
@@ -158,7 +159,7 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 	const viaNotice = (item: ResultItem): Handoff => ({
 		ids: ids(item), label: item.taskId ?? 'result',
 		hand: () => { if (!notice(item)) return false; record(item, 'injected'); return true; },
-		rehand: () => notice({ ...item, note: CUT_OFF_NOTE }),
+		rehand: () => notice(item),
 		fallback: () => retryThenDm(item),
 	});
 	const retryThenDm = (item: ResultItem) => {
@@ -215,7 +216,7 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 					console.log(`${ts()} [RelayAgent] ${item.taskId}: result returned to its work call`);
 					return true;
 				},
-				rehand: () => notice({ ...item, note: CUT_OFF_NOTE }),
+				rehand: () => notice(item),
 				fallback: () => deliverElsewhere(item),
 			});
 			return;
