@@ -13,7 +13,7 @@ process.env.SUTANDO_TEST_MODE = '1';
 const MONTH = new Date().toISOString().slice(0, 7);
 for (const d of ['tasks', 'results', join('tasks', 'archive', MONTH), join('results', 'archive', MONTH), join('state', 'activity')]) mkdirSync(join(TMP, d), { recursive: true });
 
-const { RelayAgent, createHandoffPacer, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS } = await import('../src/relay-agent.js');
+const { RelayAgent, createHandoffPacer, coveredTasks, requestMarks, relayAgentSubagentConfig, createVoiceTaskStore, frameResult, planReconcile, NOT_PICKED_MS, MAX_REPLAYS } = await import('../src/relay-agent.js');
 const { frameTaskResult } = await import('../src/inject-framing.js');
 const tb = await import('../src/task-bridge.js');
 const { _pendingTasksForTest, voiceTaskStore, MISSED_RESULT_NOTE, _forwardOfflineThenArchive, reconcileVoiceTasks, voiceTaskRows, voiceTasksAhead } = tb;
@@ -529,5 +529,22 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		t.p.onModelAudio();
 		t.p.onTurnEnd(false);
 		assert.deepEqual(t.handed, ['a', 'c elsewhere']);
+	});
+});
+
+describe('which open voice tasks a summary speaks for', () => {
+	it('a request is matched only by its sure marks: numbers of three or more digits, quoted names', () => {
+		assert.deepEqual(requestMarks('Check the status and details of PR #5302.'), ['5302']);
+		assert.deepEqual(requestMarks('查一下 "Meeting notes" 那封邮件'), ['meeting notes']);
+		assert.deepEqual(requestMarks('what is the weather tomorrow'), [], 'no sure mark: never matched');
+	});
+
+	it('5167 is not 51167; every mark must appear; heard and corrected rows are left out', () => {
+		const store = createVoiceTaskStore(join(TMP, `covers-${Math.random()}.json`));
+		store.add('task-a', 'Check PR #5302'); store.add('task-b', 'Check PR #5167'); store.add('task-c', 'weather');
+		store.add('task-d', 'Check PR #5229'); store.set('task-d', 'spoken');
+		store.add('task-e', 'Check PR #51167'); store.setSupersededBy('task-e', 'task-b');
+		assert.deepEqual(coveredTasks(store, 'PR 5302 waits for review; PR 51167 does not exist; 5229 conflicts.'), ['task-a']);
+		assert.deepEqual(coveredTasks(store, 'PR 5167 is blocked.').sort(), ['task-b']);
 	});
 });

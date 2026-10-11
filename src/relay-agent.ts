@@ -27,6 +27,8 @@ export interface VoiceTaskRecord {
 	notPickedNoticed?: boolean;
 	/** The core answered this task in another task's result (`[deduped: <id>]`): its outcome is that result. */
 	answeredBy?: string;
+	/** The user corrected this request with a later task: its own result is not said. */
+	supersededBy?: string;
 	/** Last change, for the cap. */
 	at: number;
 }
@@ -92,6 +94,11 @@ export function createVoiceTaskStore(path: string, now: () => number = Date.now)
 			if (taskId === target) return;
 			update(taskId, (row) => ({ ...row, answeredBy: target }));
 		},
+		/** The user corrected `taskId` with `by`. */
+		setSupersededBy(taskId: string, by: string): void {
+			if (taskId === by) return;
+			update(taskId, (row) => ({ ...row, supersededBy: by }));
+		},
 		/** The rows the core answered in `target`'s result. */
 		answeredBy(target: string): Array<[string, VoiceTaskRecord]> {
 			return Object.entries(read()).filter(([, row]) => row.answeredBy === target);
@@ -128,6 +135,7 @@ export const NOT_PICKED_MS = 3 * 60 * 1000;
  * the core did with what the user was told and returns what is still owed.
  */
 export function planReconcile(i: ReconcileInput): ReconcileAction {
+	if (i.row.supersededBy) return 'none';
 	if (i.settledResult) {
 		if (i.resultIsSkip || i.inFlight) return 'none';
 		if (i.row.delivery === 'spoken' || i.row.delivery === 'injected') return 'none';
@@ -148,6 +156,8 @@ export interface ResultItem {
 	requests?: string[];
 	/** Other voice tasks this result answers (the core deduped them into it): recorded with it. */
 	alsoFor?: string[];
+	/** A message with no task of its own that speaks for these voice tasks (see coveredTasks). */
+	covers?: string[];
 }
 
 /** The text handed to the model for one result: the requests it answers, the result, any note. */
@@ -160,6 +170,37 @@ export function frameResult(i: ResultItem): string {
 			? `${framedSystem(`This answers the user's request: ${quote(rs[0])}.`)}\n\n`
 			: `${framedSystem(`This answers ${rs.length} of the user's requests: ${rs.map(quote).join('; ')}. Cover each of them.`)}\n\n`;
 	return asked + (i.framed ? i.text : frameTaskResult(i.text)) + (i.note ? `\n\n${framedSystem(i.note)}` : '');
+}
+
+/** A correction reaches back this far for the request it replaces. */
+export const SUPERSEDE_WINDOW_MS = 60 * 60_000;
+
+/** A result the table says needs no saying: its task was corrected, or every task it answers was heard. */
+export function resultIsMoot(store: VoiceTaskStore, ids: string[]): boolean {
+	if (!ids.length) return false;
+	if (store.get(ids[0])?.supersededBy) return true;
+	return ids.every((id) => store.get(id)?.delivery === 'spoken');
+}
+
+/** What identifies a request beyond doubt: numbers of three or more digits, and quoted names. */
+export function requestMarks(request: string): string[] {
+	const numbers = request.match(/\d{3,}/g) ?? [];
+	const quoted = [...request.matchAll(/["“「]([^"”」]{2,})["”」]/g)].map((m) => m[1].toLowerCase());
+	return [...new Set([...numbers, ...quoted])];
+}
+
+/**
+ * The open voice tasks a message with no task of its own (a summary the core wrote) speaks for:
+ * those whose request marks all appear in it. A request with no such mark is never matched, so
+ * an unmatched result is said as usual; a guess could only drop one.
+ */
+export function coveredTasks(store: VoiceTaskStore, text: string, now = Date.now()): string[] {
+	const lower = text.toLowerCase();
+	const has = (mark: string) => /^\d+$/.test(mark) ? new RegExp(`(?<!\\d)${mark}(?!\\d)`).test(text) : lower.includes(mark);
+	return store.list()
+		.filter(([, row]) => row.delivery !== 'spoken' && !row.supersededBy && now - (row.submittedAt ?? 0) < SUPERSEDE_WINDOW_MS)
+		.filter(([, row]) => { const marks = requestMarks(row.text ?? ''); return marks.length > 0 && marks.every(has); })
+		.map(([id]) => id);
 }
 
 /** How long a handed-over result waits for the model's turn before the next one goes anyway. */
@@ -179,6 +220,8 @@ export interface Handoff {
 	rehand(): boolean;
 	/** It could not be handed: deliver it another way. */
 	fallback(): void;
+	/** The table says it no longer needs saying (checked when its turn comes). */
+	moot?(): boolean;
 }
 
 /**
@@ -235,6 +278,7 @@ export function createHandoffPacer(deps: {
 		}
 		while (!current && queue.length) {
 			const h = queue.shift()!;
+			if (h.moot?.()) { deps.log?.(`[RelayAgent] ${h.label}: already heard or corrected; not said`); continue; }
 			if (!h.hand()) { h.fallback(); continue; }
 			current = { h, started: false, retried: false, timer: arm() };
 		}
@@ -337,6 +381,9 @@ export class RelayAgent implements PersistentSubagentInstance {
 		const submitted = await this.deps.submit(args);
 		const taskId = submitted.taskId;
 		if (submitted.status !== 'pending' || typeof taskId !== 'string') return JSON.stringify(submitted);
+		const replaces = typeof args.replaces === 'string' ? args.replaces.trim() : '';
+		if (replaces) this.supersede(taskId, replaces);
+
 		// The ordinary "working on it" is the tool's pending message; a queue position or an offline core is said now.
 		const unusual = (typeof submitted.queuedAhead === 'number' && submitted.queuedAhead > 0) || submitted.watcherOnline === false;
 		if (unusual && typeof submitted.message === 'string') this.deps.notice?.(framedSystem(submitted.message));
@@ -368,6 +415,23 @@ export class RelayAgent implements PersistentSubagentInstance {
 			other.resolve(JSON.stringify({ status: 'answered_together', taskId: id, answeredIn: taskId }));
 		}
 		return true;
+	}
+
+	/**
+	 * The model said this task corrects an earlier request (`replaces` names it, e.g. a misheard
+	 * number). The table marks every recent request containing those words, not yet heard, as
+	 * superseded: its result is not said, and its waiting call ends.
+	 */
+	private supersede(taskId: string, replaces: string): void {
+		const needle = replaces.toLowerCase();
+		const since = Date.now() - SUPERSEDE_WINDOW_MS;
+		for (const [id, row] of this.deps.store.list()) {
+			if (id === taskId || row.delivery === 'spoken' || row.supersededBy || (row.submittedAt ?? 0) < since) continue;
+			if (!row.text?.toLowerCase().includes(needle)) continue;
+			this.deps.store.setSupersededBy(id, taskId);
+			this.endCall(id, 'delivered_separately');
+			this.deps.log?.(`[RelayAgent] ${id}: corrected by ${taskId}; its result will not be said`);
+		}
 	}
 
 	/** Ends the call waiting on `taskId` without its result. False when none waits. */

@@ -150,4 +150,43 @@ describe('relay agent end to end', () => {
 		session.emit('turn.end', { turnId: 't9' } as never);
 		assert.match(await calls[1], /PR 7002/);
 	});
+	it('a corrected request: the old task\'s result is not said, its call ends, the new one is', async () => {
+		const old = voiceTask('Check the status and details of PR #51167.');
+		submitted = { status: 'pending', taskId: old, queuedAhead: 0, watcherOnline: true };
+		const oldCall = relay.invoke('Execute tool: work', { task: 'PR 51167' });
+		await tick(0);
+		const fresh = voiceTask('Check the status and details of PR #5167.');
+		submitted = { status: 'pending', taskId: fresh, queuedAhead: 0, watcherOnline: true };
+		const freshCall = relay.invoke('Execute tool: work', { task: 'PR 5167', replaces: '51167' });
+		assert.match(await oldCall, /delivered to the user separately/, 'the old call ends at the correction');
+		assert.equal(voiceTaskStore.get(old)?.supersededBy, fresh);
+		const before = sent.length;
+		writeFileSync(join(TMP, 'results', `${old}.txt`), 'PR 51167 does not exist.');
+		writeFileSync(join(TMP, 'results', `${fresh}.txt`), 'PR 5167 is blocked on review.');
+		assert.match(await freshCall, /PR 5167 is blocked/);
+		session.emit('turn.start');
+		session.emit('response.first_audio');
+		session.emit('turn.end', { turnId: 't20' } as never);
+		await tick(1_200); // reconcile passes
+		assert.ok(!sent.slice(before).some((t) => t.includes('51167')), 'the corrected request\'s result is never said');
+	});
+
+	it('a summary naming open voice tasks\' requests: once it is said, their own results are not said again', async () => {
+		const [a, b] = ['5302', '5229'].map((pr) => voiceTask(`check PR ${pr}`));
+		const calls = [a, b].map((id) => { submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true }; return relay.invoke('Execute tool: work', {}); });
+		await tick(0);
+		const before = sent.length;
+		writeFileSync(join(TMP, 'results', `proactive-summary-${Date.now()}.txt`), 'Both PRs: 5302 waits for review; 5229 conflicts.');
+		await until(() => sent.slice(before).some((t) => t.includes('Both PRs')));
+		session.emit('turn.start');
+		session.emit('response.first_audio');
+		session.emit('turn.end', { turnId: 't21' } as never);
+		assert.equal(voiceTaskStore.get(a)?.delivery, 'spoken');
+		assert.equal(voiceTaskStore.get(b)?.delivery, 'spoken');
+		writeFileSync(join(TMP, 'results', `${a}.txt`), 'PR 5302 detail.');
+		writeFileSync(join(TMP, 'results', `${b}.txt`), 'PR 5229 detail.');
+		for (const c of calls) assert.match(await c, /delivered to the user separately/, 'their calls end without saying them');
+		await tick(800);
+		assert.ok(!sent.slice(before).some((t) => /PR 5302 detail|PR 5229 detail/.test(t)), 'not said again');
+	});
 });

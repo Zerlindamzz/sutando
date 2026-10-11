@@ -1018,6 +1018,13 @@ export const workTool: ToolDefinition = {
 		'This is how Sutando thinks and acts. Results are spoken back when ready.',
 	parameters: z.object({
 		task: z.string().describe('Full description of the task to perform'),
+		replaces: z
+			.string()
+			.optional()
+			.describe(
+				'Only when this request corrects one the user made earlier in this conversation ' +
+				'(e.g. a misheard number): the words that identify that earlier request, e.g. "51167".'
+			),
 		timeout_minutes: z
 			.number()
 			.optional()
