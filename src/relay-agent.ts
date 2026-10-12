@@ -38,12 +38,15 @@ const STORE_CAP = 200;
 
 /**
  * The voice task table, in memory: one row per `work` task the user asked for by voice, with where the
- * core stands and whether the user heard the answer. It lives in the voice agent alone, like the
- * pending-task map next to it; nothing else reads it (the model reads it through get_task_status).
- * Capped at the newest STORE_CAP rows.
+ * core stands and whether the user heard the answer. The voice agent owns it, like bodhi's
+ * ConversationContext; copies go out through `onChange` listeners, the way bodhi's history stores
+ * write the conversation (the status page reads one). Capped at the newest STORE_CAP rows.
  */
 export function createVoiceTaskStore(now: () => number = Date.now) {
 	const tasks = new Map<string, VoiceTaskRecord>();
+	// Called after every change, like bodhi's history stores after a turn: they copy the table out
+	// (asynchronously, on their own schedule); the table never waits for them.
+	const listeners = new Set<() => void>();
 	const update = (taskId: string, change: (row: VoiceTaskRecord) => VoiceTaskRecord | null) => {
 		const next = change(tasks.get(taskId) ?? { at: 0 });
 		if (!next) return;
@@ -51,8 +54,16 @@ export function createVoiceTaskStore(now: () => number = Date.now) {
 		if (tasks.size > STORE_CAP) {
 			for (const [id] of [...tasks.entries()].sort((a, b) => a[1].at - b[1].at).slice(0, tasks.size - STORE_CAP)) tasks.delete(id);
 		}
+		for (const l of listeners) {
+			try { l(); } catch (err) { console.error(`[RelayAgent] task table listener failed: ${err instanceof Error ? err.message : err}`); }
+		}
 	};
 	return {
+		/** Called after each change to the table; returns the unsubscribe. */
+		onChange(listener: () => void): () => void {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
 		get(taskId: string): VoiceTaskRecord | undefined {
 			return tasks.get(taskId);
 		},
