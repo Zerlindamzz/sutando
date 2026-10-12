@@ -228,6 +228,9 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 					return true;
 				},
 				hand: () => {
+					// The result waited its turn and the client left meanwhile (2026-10-11 00:14): a result handed
+					// to a session nobody hears would be recorded heard. It goes the offline way instead.
+					if (!canSpeak()) return false;
 					if (!opts.relay.offerResult(current(item))) return false;
 					console.log(`${ts()} [RelayAgent] ${item.taskId}: result returned to its work call`);
 					return true;

@@ -117,6 +117,30 @@ describe('relay agent end to end', () => {
 		assert.equal(readdirSync(join(TMP, 'results')).filter((f) => f.startsWith(`proactive-result-${id}-`)).length, 1);
 		session.clientConnected = true;
 	});
+	it('the client leaves while a result waits its turn: it is not handed to the empty session, it goes to the DM', async () => {
+		// 2026-10-11 00:10-00:14 UTC: four results waited behind the user's talking; the user closed the page;
+		// each was then returned to its work call a minute apart, recorded heard, and never read to anyone.
+		const id = voiceTask('check PR 5167');
+		submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true };
+		const call = relay.invoke('Execute tool: work', { task: 'check PR 5167' });
+		await tick(0);
+		const talking = setInterval(() => session.emit('speech.user_started'), 50); // the user keeps talking
+		writeFileSync(join(TMP, 'results', `${id}.txt`), 'PR 5167 is open.');
+		await tick(2_600); // the watcher (2 s) has taken the result; it waits in the pacer for the user's turn to end
+		assert.equal(heard(id), false, 'waits while the user talks');
+		assert.equal(relay.isWaiting(id), true);
+		clearInterval(talking);
+		session.clientConnected = false; // the user closes the page
+		session.emit('speech.user_ended');
+		session.emit('turn.start'); session.emit('response.first_audio'); session.emit('turn.end', { turnId: 't5167' } as never);
+		const out = await Promise.race([call, tick(8_000).then(() => 'timed out')]);
+		assert.doesNotMatch(out, /PR 5167 is open/, 'not handed to a session nobody hears');
+		assert.notEqual(voiceTaskStore.get(id)?.delivery, 'injected');
+		await until(() => voiceTaskStore.get(id)?.delivery === 'dm');
+		assert.equal(voiceTaskStore.get(id)?.delivery, 'dm', 'one DM copy; read on reconnect');
+		session.clientConnected = true;
+	});
+
 	it('two results landing in the same moment: both reach the model, the second after the model answered the first', async () => {
 		const [a, b] = ['5275', '5251'].map((pr) => voiceTask(`check PR ${pr}`));
 		const calls = [a, b].map((id) => { submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true }; return relay.invoke('Execute tool: work', {}); });
