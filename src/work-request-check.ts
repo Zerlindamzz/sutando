@@ -20,15 +20,23 @@ export interface WorkCheckInput {
 export type WorkRequestCheck = (input: WorkCheckInput, signal?: AbortSignal) => Promise<WorkCheck>;
 
 export const WORK_CHECK_MODEL = process.env.WORK_CHECK_MODEL || 'gemini-3-flash-preview';
-export const WORK_CHECK_TIMEOUT_MS = 2_500;
+export const WORK_CHECK_TIMEOUT_MS = 4_000;
 
 export function workCheckPrompt(i: WorkCheckInput): string {
 	return [
-		'A voice assistant is about to send this request to its back-end agent (the core), which does lookups, actions and file work.',
-		'Decide whether the request can go as written. Reply with JSON only, one object, no prose.',
-		'{"action":"submit"} - the request says what it is about (which PR, file, person, place, repository, ...), or the recent words make that clear.',
-		'{"action":"ask","question":"..."} - a name, number or target is missing and the recent words do not supply it. The question is ONE short sentence in the user\'s language, asking only for the missing piece.',
-		'Prefer submit when in doubt. Never add facts.',
+		'A voice assistant wrote a request for its back-end agent (the core), which does lookups, actions and file work. Before it is sent, decide one thing: does the request identify WHICH thing it is about?',
+		'Rules:',
+		'- The request is about a specific thing when it names a type: a PR, an issue, a file, a document, a person, a repository, a meeting, a place.',
+		'- It identifies it when it gives the number, name or title, or when the recent words do.',
+		'- "the PR", "that file", "the meeting" with no number, name or title anywhere = not identified.',
+		'Reply with JSON only:',
+		'{"action":"ask","question":"..."} when a specific thing is not identified. One short question in the user\'s language asking only for the missing piece.',
+		'{"action":"submit"} otherwise, including requests about no specific thing (a general summary, a search, a how-to).',
+		'Examples:',
+		'Request "Check the status of the PR"; recent words "帮我查一下那个 PR 的状态" -> {"action":"ask","question":"你说的是哪个 PR？"}',
+		'Request "Check the status of PR 5302"; recent words "帮我查一下 PR5302 的状态" -> {"action":"submit"}',
+		'Request "Summarize the meeting notes"; recent words "帮我总结一下会议纪要" -> {"action":"ask","question":"哪一场会议的纪要？"}',
+		'Request "List the PRs merged this week in sonichi/sutando" -> {"action":"submit"}',
 		'',
 		'Recent words (oldest first):',
 		i.recentConversation.trim() || '(none)',
@@ -54,6 +62,7 @@ export function createGeminiWorkCheck(opts: { apiKey: () => string | undefined; 
 	return async (input, signal) => {
 		const apiKey = opts.apiKey();
 		if (!apiKey) return { action: 'submit' };
+		const t0 = Date.now();
 		const ctl = new AbortController();
 		const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? WORK_CHECK_TIMEOUT_MS);
 		signal?.addEventListener('abort', () => ctl.abort(), { once: true });
@@ -63,7 +72,9 @@ export function createGeminiWorkCheck(opts: { apiKey: () => string | undefined; 
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					contents: [{ parts: [{ text: workCheckPrompt(input) }] }],
-					generationConfig: { maxOutputTokens: 120, temperature: 0 },
+					// A thinking model spends the output budget on thinking and returns a cut-off "{"action":" (seen 2026-10-12):
+					// thinking off, JSON out.
+					generationConfig: { maxOutputTokens: 200, temperature: 0, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 } },
 				}),
 				signal: ctl.signal,
 			});
@@ -73,7 +84,9 @@ export function createGeminiWorkCheck(opts: { apiKey: () => string | undefined; 
 				opts.log?.(`[RelayAgent] work check gave no answer (${data.error?.message ?? 'empty'}); submitting`);
 				return { action: 'submit' };
 			}
-			return parseWorkCheck(text);
+			const verdict = parseWorkCheck(text);
+			opts.log?.(`[RelayAgent] work check: ${verdict.action}${verdict.action === 'ask' ? ` (${verdict.question})` : ''} in ${Date.now() - t0}ms`);
+			return verdict;
 		} catch (err) {
 			opts.log?.(`[RelayAgent] work check failed (${err instanceof Error ? err.message : String(err)}); submitting`);
 			return { action: 'submit' };
