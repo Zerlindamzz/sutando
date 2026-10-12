@@ -490,7 +490,7 @@ def namespace_problems(directory: Path) -> list:
         for path in paths:
             try:
                 if not records:
-                    present(path)
+                    present(path, stat.S_IFREG)  # a directory, FIFO or link here is unknown
                 elif not isinstance(read_json_strict(path), dict):
                     problems.append((path, "not a JSON object"))
             except OSError:

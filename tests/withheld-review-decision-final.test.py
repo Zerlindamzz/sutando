@@ -2326,6 +2326,24 @@ check(handled is True and "please reply again" in control_body("reservation-leaf
       and json.loads(path.read_text())["status"] == "awaiting_owner" and len(shared_posts()) == before,
       f"a linked .issued reservation: the reply is consumed and answered ({handled})")
 
+# A claims/ or issued/ entry that is a directory or a FIFO is unknown too: the reply is answered,
+# the guard's preflight reports it, and nothing posts.
+for folder in ("claims", "issued"):
+    for kind in ("directory", "fifo"):
+        label = f"odd-{folder}-{kind}"
+        bridge._STATE = root / label
+        path, rid = new_review(f"task-{label}")
+        entry = path.parent / folder / f"{path.stem}.odd"
+        entry.parent.mkdir(mode=0o700, exist_ok=True)
+        entry.mkdir() if kind == "directory" else os.mkfifo(entry)
+        before = len(shared_posts())
+        handled = bridge._handle_review_decision(decision("No", rid, label))
+        reported = [p for p, _reason in guard.namespace_problems(path.parent)]
+        check(handled is True and "please reply again" in control_body(label) and entry in reported
+              and json.loads(path.read_text())["status"] == "awaiting_owner"
+              and len(shared_posts()) == before,
+              f"{label}: the reply is answered and the preflight reports it ({handled}, {reported})")
+
 # 25v. The absence rule itself: only a genuinely missing entry below a real, readable directory
 # is absent; a symlink, a wrong kind, a non-directory parent or a dangling link raises.
 scratch = root / "absence"

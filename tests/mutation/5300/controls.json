@@ -58,7 +58,7 @@
   {
    "name": "the preflight does not check claims/ and issued/ entries",
    "file": "src/policy/egress/result.py",
-   "old": "                if not records:\n                    present(path)\n                elif",
+   "old": "                if not records:\n                    present(path, stat.S_IFREG)  # a directory, FIFO or link here is unknown\n                elif",
    "new": "                if not records:\n                    pass\n                elif"
   },
   {
@@ -96,6 +96,12 @@
    "file": "src/policy/egress/result.py",
    "old": "    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)",
    "new": "    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)"
+  },
+  {
+   "name": "a non-regular claims/ or issued/ entry reads as fine",
+   "file": "src/policy/egress/result.py",
+   "old": "                    present(path, stat.S_IFREG)  # a directory, FIFO or link here is unknown",
+   "new": "                    present(path)"
   }
  ]
 }

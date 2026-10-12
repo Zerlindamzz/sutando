@@ -328,6 +328,21 @@ class WithheldReviewsReadable(unittest.TestCase):
                 self.assertEqual(r["status"], "warn")
                 self.assertIn(f"{folder}/wr_0000000000000006.entry", r["detail"])
 
+    def test_a_directory_or_fifo_entry_in_claims_or_issued_is_named(self):
+        for folder in ("claims", "issued"):
+            for kind in ("directory", "fifo"):
+                with self.subTest(folder=folder, kind=kind):
+                    inside = self.base / folder
+                    inside.mkdir()
+                    entry = inside / "wr_0000000000000007.odd"
+                    entry.mkdir() if kind == "directory" else os.mkfifo(entry)
+                    try:
+                        r = self.hc.check_withheld_reviews_readable(self.ws)
+                    finally:
+                        shutil.rmtree(inside)
+                    self.assertEqual(r["status"], "warn")
+                    self.assertIn(f"{folder}/wr_0000000000000007.odd", r["detail"])
+
     def test_the_check_is_registered(self):
         source = (REPO / "src" / "health-check.py").read_text()
         self.assertTrue("checks.append(check_withheld_reviews_readable())" in source,
