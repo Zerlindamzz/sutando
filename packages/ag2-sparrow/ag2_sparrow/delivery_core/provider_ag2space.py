@@ -71,18 +71,16 @@ class AG2SpaceResultProvider:
         return None
 
 
-ROOM_PATH = "/v1/room"
-
-
 class AG2SpaceRoomMessageProvider:
-    """Posts one message to an AG2 Space room. Only an event id proves delivery: an
-    accepted response without one may have landed, so it is never re-sent."""
+    """Sends one message to an AG2 Space room through the injected room sender. Only a Matrix
+    event id proves delivery, and it is durably recorded before the send counts as delivered."""
 
     capabilities = ProviderCapabilities(reconcile_capable=False, idempotent_send=False)
 
-    def __init__(self, request: Callable[..., dict]):
-        self._request = request
-        self.receipts: dict = {}
+    def __init__(self, send: Callable[[str, str, str], dict],
+                 record_receipt: Callable[[str, str], None]):
+        self._send = send
+        self._record_receipt = record_receipt
 
     def deliver(self, item_id: str, payload: bytes,
                 idempotency_key: str) -> DeliveryReceipt:
@@ -92,9 +90,7 @@ class AG2SpaceRoomMessageProvider:
         except (UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
             raise ProviderPermanentRefused(f"malformed room message for {item_id}: {e}") from e
         try:
-            resp = self._request("POST", ROOM_PATH, {
-                "op": "message", "room_id": room, "body": body,
-                "dedupe_key": idempotency_key}, timeout=20)
+            resp = self._send(room, body, idempotency_key)
         except urllib.error.HTTPError as e:
             if 500 <= e.code <= 599:
                 raise ProviderIndeterminate(f"gateway error for {item_id}: HTTP {e.code}") from e
@@ -103,15 +99,21 @@ class AG2SpaceRoomMessageProvider:
             raise ProviderPermanentRefused(f"gateway refused {item_id}: HTTP {e.code}") from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise ProviderIndeterminate(f"transport failure for {item_id}: {e}") from e
-        receipt = classify_response(200, resp, id_keys=("event_id",))
-        if receipt.outcome is OutboxOutcome.CONFIRMED:
-            self.receipts[item_id] = receipt.receipt_id
-            return DeliveryReceipt(outcome=DeliveryOutcome.CONFIRMED, provider_ref=receipt.receipt_id,
-                                   destination=room, detail=receipt.detail)
+        # An explicit refusal wins over any id the same response carries.
         if isinstance(resp, dict) and (resp.get("ok") is False or resp.get("error")
                                        or resp.get("errcode")):
             raise ProviderPermanentRefused(f"gateway declined {item_id}: {str(resp)[:200]}")
-        raise ProviderIndeterminate(f"accepted without an event id for {item_id}")
+        receipt = classify_response(200, resp, id_keys=("event_id",))
+        event_id = resp.get("event_id") if isinstance(resp, dict) else None
+        if not (receipt.outcome is OutboxOutcome.CONFIRMED and isinstance(event_id, str)
+                and event_id.startswith("$") and len(event_id.strip()) > 1):
+            raise ProviderIndeterminate(f"accepted without a Matrix event id for {item_id}")
+        try:
+            self._record_receipt(item_id, event_id)
+        except Exception as e:  # noqa: BLE001 — sent, but not provably recorded as sent
+            raise ProviderIndeterminate(f"confirmed {item_id} but its receipt was not recorded: {e}") from e
+        return DeliveryReceipt(outcome=DeliveryOutcome.CONFIRMED, provider_ref=event_id,
+                               destination=room, detail=receipt.detail)
 
     def reconcile(self, attempt: DeliveryAttempt) -> Optional[DeliveryReceipt]:
         return None

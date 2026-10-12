@@ -85,6 +85,7 @@ originals = {name: getattr(bridge, name) for name in (
     "_reenroll_identity", "_tier_for", "_req", "_match_review_decision", "_log",
     "team_result_guard")}
 bridge.team_result_guard = guard
+check(str(bridge.RESULTS_DIR).startswith(str(root)), f"the outbox lives in the sandbox: {bridge.RESULTS_DIR}")
 bridge._STATE = root / "state"
 bridge._WITHHELD_DM_CACHE = bridge._STATE / "withheld-review-dm.json"
 bridge._WITHHELD_CONTROL_DIR = bridge._STATE / "withheld-review-control-results"
@@ -1125,7 +1126,7 @@ def run_publish(path, claimed, room_req, beats=3):
 
 
 def outbox_item(path, rid, claimed):
-    return outbox_mod.read_item(bridge._STATE / "withheld-review-outbox",
+    return outbox_mod.read_item(bridge._withheld_outbox().backend.root,
                                 f"{rid}.{claimed['decision_claim_id']}") or {}
 
 
@@ -1137,6 +1138,13 @@ check(first is False and len(shared_posts()) - before == 1 and record["status"] 
       and outbox_item(path, rid, claimed).get("reason") == "outcome-unknown",
       f"ok without an event id: not published, parked unknown, never re-sent ({record['status']})")
 
+mark = len(calls)
+bridge._retry_withheld_reviews()
+parked_root = bridge._withheld_outbox().backend.root
+check(json.loads(path.read_text()).get("publish_parked") == "outcome-unknown"
+      and "could not be confirmed and requires attention" in card_edits_since(mark)[-1]
+      and parked_root.parent == bridge.RESULTS_DIR and parked_root.name.startswith(".outbox"),
+      "a parked release shows on the card and sits where the parked-outbox health check looks")
 path, rid, claimed, room_req = release("event-only", lambda: {"event_id": "$only"})
 before = len(shared_posts())
 first = run_publish(path, claimed, room_req)
@@ -1163,8 +1171,9 @@ check(len(shared_posts()) - before == 1 and record["status"] == "publish_failed"
 path, rid, claimed, room_req = release("server-error", http_error(503))
 before = len(shared_posts())
 run_publish(path, claimed, room_req)
-check(len(shared_posts()) - before == 1 and json.loads(path.read_text())["status"] == "publish_pending",
-      "a 5xx may have applied: parked, never re-sent, still pending")
+check(len(shared_posts()) - before == 1 and json.loads(path.read_text())["status"] == "publish_pending"
+      and outbox_item(path, rid, claimed).get("reason") == "outcome-unknown",
+      "a 5xx may have applied: parked unknown, never re-sent, still pending")
 
 path, rid, claimed, room_req = release("auth", http_error(401))
 before = len(shared_posts())
@@ -1243,7 +1252,7 @@ dead.wait()
 
 
 def owner_died(path, rid, claimed):
-    root_dir = bridge._STATE / "withheld-review-outbox"
+    root_dir = bridge._withheld_outbox().backend.root
     claim_file = outbox_mod._claim_path(root_dir, f"{rid}.{claimed['decision_claim_id']}")
     data = json.loads(claim_file.read_text())
     claim_file.write_text(json.dumps({**data, "pid": dead.pid, "start_usec": None,
@@ -1285,11 +1294,66 @@ for stage, expected_posts in (("before-claim", 1), ("before-post", 1), ("after-p
         bridge.DeliveryCore.deliver_one, bridge._commit_publication = real_deliver, real_commit
     if stage in ("before-post", "after-post"):
         owner_died(path, rid, claimed)
+    bridge._WITHHELD_OUTBOX = None  # the restart builds a fresh outbox and provider
     run_publish(path, claimed, room_req)
     _live, record = final_record(path)
-    check(len(shared_posts()) - before == expected_posts and record["status"] == "published",
+    check(len(shared_posts()) - before == expected_posts and record["status"] == "published"
+          and record.get("published_event_id") == "$c",
           f"crash {stage}: {len(shared_posts()) - before} POSTs (outbox bound {expected_posts}), "
-          f"{record['status']}")
+          f"{record['status']}, event id {record.get('published_event_id')!r}")
+
+# 24c. A refusal wins over an event id in the same response, and only a Matrix event id
+# confirms: an integer or another string is unconfirmed and parks.
+for label, answer, expected in (
+        ("refusal-with-id", {"ok": False, "error": "refused", "event_id": "$error-context"},
+         "publish_failed"),
+        ("integer-id", {"ok": True, "event_id": 17}, "publish_pending"),
+        ("not-matrix-id", {"ok": True, "event_id": "msg-17"}, "publish_pending")):
+    path, rid, claimed, room_req = release(label, lambda _a=answer: dict(_a))
+    before = len(shared_posts())
+    run_publish(path, claimed, room_req)
+    _live, record = final_record(path)
+    check(len(shared_posts()) - before == 1 and record["status"] == expected
+          and "published_event_id" not in record,
+          f"{label}: {record['status']} (expected {expected}), never published")
+
+# 24d. DELIVERED without a recorded receipt is reported and left pending, never published;
+# a receipt that cannot be recorded leaves the send unconfirmed.
+path, rid, claimed, room_req = release("no-receipt", lambda: {"event_id": "$lost"})
+real_commit = bridge._commit_publication
+
+
+def crash_and_lose_receipt(*a, **k):
+    bridge._commit_publication = real_commit
+    current = json.loads(path.read_text())
+    stripped = {k2: v for k2, v in current.items() if k2 != "release_event_id"}
+    guard.update_record(path, stripped, expect=guard.record_version(current))
+    raise Crash()
+
+
+bridge._commit_publication = crash_and_lose_receipt
+try:
+    run_publish(path, claimed, room_req, beats=0)
+except Crash:
+    pass
+finally:
+    bridge._commit_publication = real_commit
+logs_before = len(logs)
+run_publish(path, claimed, room_req)
+record = json.loads(path.read_text())
+check(record["status"] == "publish_pending" and "published_event_id" not in record
+      and any("no event id was recorded" in line for line in logs[logs_before:]),
+      f"delivered without a receipt: reported, left pending ({record['status']})")
+path, rid, claimed, room_req = release("receipt-fails", lambda: {"event_id": "$unrecorded"})
+real_receipt = guard.record_release_receipt
+guard.record_release_receipt = lambda *a, **k: False
+try:
+    run_publish(path, claimed, room_req)
+finally:
+    guard.record_release_receipt = real_receipt
+check(json.loads(path.read_text())["status"] == "publish_pending"
+      and outbox_item(path, rid, claimed).get("reason") == "outcome-unknown",
+      "a receipt that cannot be recorded leaves the send unconfirmed and parked")
 
 # 25. An owner decision is durable before it is reported: the record's directory is synced
 # after the rename, a sync failure is not success, and an orphan claim blocks a second one.
@@ -1370,7 +1434,8 @@ try:
     claimed = guard.claim_withheld_decision(path, dict(YES))
 finally:
     guard._fsync_directory = real_sync
-check(claimed is None, "a decision whose rename cannot be made durable is not reported as made")
+check(claimed is None and any((path.parent / "claims").glob(f"{path.stem}.*")),
+      "a decision whose rename landed but cannot be made durable is not reported, and its claim stays")
 bridge._STATE = root / "orphan-claim"
 path, rid = new_review("task-orphan-claim")
 awaiting = path.read_bytes()
@@ -1381,6 +1446,48 @@ check(guard.claim_withheld_decision(path, dict(NO)) is None
       and bridge._handle_review_decision(decision("No", rid, "orphan-no")) is True
       and len(shared_posts()) == before and json.loads(path.read_text())["status"] == "awaiting_owner",
       "orphan claim: a later opposite reply is refused and nothing is published")
+check("was not saved" in json.loads(bridge._control_result_path("orphan-no").read_text())["body"],
+      "orphan claim: the owner is told the earlier decision was lost")
+
+# 25b. A decision whose record write fails before the rename leaves no claim behind: the
+# owner is told it was not saved, and answering again works.
+bridge._STATE = root / "unwritten-decision"
+path, rid = new_review("task-unwritten")
+real_replace, failed = os.replace, []
+
+
+def replace_fails_once(source, target, *a, **k):
+    if pathlib.Path(target) == path and not failed:
+        failed.append(True)
+        raise OSError(28, "No space left on device")
+    return real_replace(source, target, *a, **k)
+
+
+os.replace = replace_fails_once
+try:
+    first = bridge._handle_review_decision(decision("No", rid, "unwritten-1"))
+finally:
+    os.replace = real_replace
+answer = json.loads(bridge._control_result_path("unwritten-1").read_text())["body"]
+check(first is True and failed and not any((path.parent / "claims").glob(f"{path.stem}.*"))
+      and json.loads(path.read_text())["status"] == "awaiting_owner" and "please reply again" in answer,
+      f"unwritten decision: no claim left, the owner is told to answer again: {answer[:60]}")
+before = len(shared_posts())
+bridge._handle_review_decision(decision("No", rid, "unwritten-2"))
+_live, record = final_record(path)
+check(record["status"] == "published" and len(shared_posts()) - before == 1,
+      f"unwritten decision: answering again publishes once ({record['status']})")
+
+# 25c. The claim-ledger entry is synced before the record names it.
+bridge._STATE = root / "ledger-synced"
+path, rid = new_review("task-ledger-synced")
+synced = []
+guard._fsync_directory = lambda directory: (synced.append(pathlib.Path(directory)), real_sync(directory))
+try:
+    guard.claim_withheld_decision(path, dict(YES))
+finally:
+    guard._fsync_directory = real_sync
+check(synced[:1] == [path.parent / "claims"], f"the claim ledger is synced first: {synced[:2]}")
 
 # 26. A reconcile that keeps failing stops re-editing the card after a bounded number of
 # tries, and says so once.

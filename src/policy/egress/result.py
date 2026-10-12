@@ -429,7 +429,8 @@ def update_record(path: Path, record: dict, field: str = "withheld_body", *,
         return _write_owned_record(path, record, field, expect)
 
 
-def _write_owned_record(path: Path, record: dict, field: str, expect: dict) -> bool:
+def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
+                        landed: "list | None" = None) -> bool:
     """The one writer of a live record; the caller holds the ledger lock. Refuses a
     record that does not own its id, would change its body, or changed since read."""
     if not path.is_file() or not _owns_its_id(path, field):
@@ -442,8 +443,9 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict) -> b
             or record_version(current) != expect):
         return False
     record["generation"] = int(current.get("generation") or 0) + 1
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary, replaced = None, False
     try:
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         if os.name != "nt":
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -452,14 +454,18 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict) -> b
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        replaced = True
         _fsync_directory(path.parent)  # success is reported only once the rename is durable
     except OSError:
+        if landed is not None:
+            landed.append(replaced)  # whether the new record may be on disk
         return False
     finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     return True
 
 
@@ -800,15 +806,44 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
         ledger = _issued_claim(path, claim_id)
         ledger.parent.mkdir(mode=0o700, exist_ok=True)
         os.close(os.open(ledger, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-        if os.name != "nt":  # the ledger entry is durable before the record names it
-            directory = os.open(ledger.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        expect = record_version(record)
+        _fsync_directory(ledger.parent)  # the ledger entry is durable before the record names it
+        expect, landed = record_version(record), []
         record.update(updates, decision_claim_id=claim_id)
-        return record if _write_owned_record(path, record, "withheld_body", expect) else None
+        if _write_owned_record(path, record, "withheld_body", expect, landed):
+            return record
+        if not any(landed):
+            ledger.unlink(missing_ok=True)  # nothing was written: the owner may answer again
+            _fsync_directory(ledger.parent)
+        return None
+
+
+def record_release_receipt(path: Path, claim_id, event_id: str) -> bool:
+    """Durably note on a pending release the event id that confirmed it, before the outbox
+    is told it was delivered; the outbox itself keeps no receipt."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(current, dict) or current.get("decision_claim_id") != claim_id:
+            return False
+        if current.get("status") == "published":
+            return True  # already settled by this claim's release
+        if current.get("status") != "publish_pending":
+            return False
+        return _write_owned_record(path, dict(current, release_event_id=event_id),
+                                   "withheld_body", record_version(current))
+
+
+def decision_lost(path: Path) -> bool:
+    """True when a claim was issued for this still-undecided review but its decision did
+    not survive: no later decision is accepted, and the owner must be told."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        record = _live_undecided_record(path)
+        return (record is not None and record.get("status") == "awaiting_owner"
+                and any(_issued_claim(path, "*").parent.glob(f"{path.stem}.*")))
 
 
 def _fsync_directory(directory: Path) -> None:

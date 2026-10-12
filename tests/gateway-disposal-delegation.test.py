@@ -1145,7 +1145,7 @@ class BridgeDelegates(unittest.TestCase):
         writers = {n.name for n in ast.walk(guard) if isinstance(n, ast.FunctionDef)
                    and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
                            and c.func.id == "_write_owned_record" for c in ast.walk(n))}
-        self.assertEqual(writers, {"update_record", "claim_withheld_decision"})
+        self.assertEqual(writers, {"update_record", "claim_withheld_decision", "record_release_receipt"})
         f = next(n for n in ast.walk(self.tree)
                  if isinstance(n, ast.FunctionDef) and n.name == "_archive_resolved_review")
         moves = [n.func.attr for n in ast.walk(f) if isinstance(n, ast.Call)

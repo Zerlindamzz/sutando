@@ -978,22 +978,28 @@ def _stale_review_write(path: Path, step: str) -> None:
          f"(now {current.get('status')}); the next beat retries from it")
 
 
-_WITHHELD_OUTBOX: "DeliveryCore | None" = None
 # Outbox park reasons that mean the release was never delivered; any other park may have landed.
 _DEFINITE_PUBLISH_FAILURES = ("permanent-refusal", "max-attempts", "retry-window-exhausted")
 
 
+def _post_room_message(room: str, body: str, dedupe_key: str) -> dict:
+    """The room-message send for an outbox provider: one /v1/room message POST."""
+    return _req("POST", "/v1/room", {"op": "message", "room_id": room, "body": body,
+                                     "dedupe_key": dedupe_key}, timeout=20)
+
+
+def _record_release_receipt(item_id: str, event_id: str) -> None:
+    """The release's durable receipt, written to its review record before the outbox is
+    told it was delivered; raises when it cannot be written."""
+    review_id, _, claim = item_id.partition(".")
+    path = _STATE / team_result_guard.WITHHELD_RESULT_DIR / f"{review_id}.json"
+    if not team_result_guard.record_release_receipt(path, claim, event_id):
+        raise OSError(f"release receipt for {review_id} not recorded")
+
+
 def _withheld_outbox() -> DeliveryCore:
     """The outbox that publishes an owner-released body to its room, at most once."""
-    global _WITHHELD_OUTBOX
-    root = _STATE / "withheld-review-outbox"
-    if _WITHHELD_OUTBOX is None or _WITHHELD_OUTBOX.backend.root != root:
-        _WITHHELD_OUTBOX = DeliveryCore(
-            DesignAClaimBackend(root, retry_schedule=RetrySchedule(), republish_delivered=False),
-            AG2SpaceRoomMessageProvider(lambda *a, **k: _req(*a, **k)),
-            policy=RetryPolicy(max_attempts=MAX_TRANSIENT_ATTEMPTS),
-            worker="withheld-review-publication")
-    return _WITHHELD_OUTBOX
+    return _delivery_core("withheld")
 
 
 def _publish_review(path: Path, record: dict) -> bool:
@@ -1017,16 +1023,45 @@ def _publish_review(path: Path, record: dict) -> bool:
         core.deliver_one(item_id, payload)
     item = read_item(core.backend.root, item_id) or {}
     if item.get("status") == "DELIVERED":
-        return _commit_publication(path, record, version,
-                                   core.provider.receipts.get(item_id, ""))
+        current = _reread_record(path)
+        if current.get("status") == "published":
+            return True
+        event_id = current.get("release_event_id")
+        if isinstance(event_id, str) and event_id:
+            committed = _commit_publication(path, current, team_result_guard.record_version(current),
+                                            event_id)
+            if committed:
+                record.clear()
+                record.update(current)  # the caller continues from the committed version
+            return committed
+        if f"no-receipt:{item_id}" not in _REFUSED_REVIEW_PUBLICATIONS:
+            _REFUSED_REVIEW_PUBLICATIONS.add(f"no-receipt:{item_id}")
+            _log(f"withheld review {path.stem}: the outbox marks the release delivered but no "
+                 "event id was recorded; it is left pending for the owner, not marked published")
+        return False
     if item.get("status") == "PARKED":
         if item.get("reason") in _DEFINITE_PUBLISH_FAILURES:
             return _record_publish_failure(path, record, version, item.get("reason"))
+        if not record.get("publish_parked"):
+            record.update({"publish_parked": str(item.get("reason")), "card_resolution_pending": True})
+            if not team_result_guard.update_record(path, record, expect=version):
+                _stale_review_write(path, "parked publication")
         if f"unknown:{item_id}" not in _REFUSED_REVIEW_PUBLICATIONS:
             _REFUSED_REVIEW_PUBLICATIONS.add(f"unknown:{item_id}")
             _log(f"withheld review {path.stem}: the publication may have landed but was not "
-                 f"confirmed ({item.get('reason')}); it is not sent again and stays pending")
+                 f"confirmed ({item.get('reason')}); it is not sent again and stays pending. "
+                 f"To send it again (a new dedupe key, so it may post twice): python3 "
+                 f"src/outbox_cli.py --root {core.backend.root} requeue {item_id}")
     return False
+
+
+def _reread_record(path: Path) -> dict:
+    """The live record, read again while it exists but does not read; {} once it is gone."""
+    for _attempt in range(5):
+        current = _read_private_json(path)
+        if current is not None or not path.exists():
+            return current or {}
+    return {}
 
 
 def _record_publish_failure(path: Path, record: dict, version: dict, reason) -> bool:
@@ -1075,6 +1110,8 @@ def _resolved_review_body(record: dict) -> str:
         outcome = "Published to the original room — the owner marked it as a false positive."
     elif status == "publish_failed":
         outcome = "False positive recorded, but publication failed and requires attention."
+    elif record.get("publish_parked"):
+        outcome = "False positive recorded, but publication could not be confirmed and requires attention."
     else:
         outcome = "False positive recorded; publication to the original room is pending."
     return f"**Private result review `{rid}` resolved**\n\n✓ {outcome}"
@@ -1187,7 +1224,21 @@ def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | Non
     # The first durable decision is final; a later or racing reply is closed and logged.
     claimed = team_result_guard.claim_withheld_decision(path, updates)
     if claimed is None:
-        _log(f"withheld review {path.stem}: already decided; reply {task.get('id')} ignored")
+        current = _read_private_json(path) or {}
+        if team_result_guard.decision_lost(path):
+            _log(f"withheld review {path.stem}: an earlier decision was lost; reply "
+                 f"{task.get('id')} not applied, left for the owner")
+            _queue_review_control_result(task, body=(
+                f"An earlier decision on review `{path.stem}` was not saved, so this reply was "
+                "not applied either. Nothing was published; the review is left for you to check."))
+        elif current.get("status") == "awaiting_owner":
+            _log(f"withheld review {path.stem}: decision could not be saved; reply "
+                 f"{task.get('id')} not applied, the owner can answer again")
+            _queue_review_control_result(task, body=(
+                f"Your decision on review `{path.stem}` could not be saved. Nothing changed; "
+                "please reply again."))
+        else:
+            _log(f"withheld review {path.stem}: already decided; reply {task.get('id')} ignored")
     _queue_review_control_result(task)
     return claimed
 
@@ -4556,20 +4607,33 @@ def _lease_close_body(skip) -> str:
 _DELIVERY_CORE: "DeliveryCore | None" = None
 
 
-def _delivery_core() -> DeliveryCore:
-    """Compose a persisted retry window over idempotent gateway result POSTs."""
-    global _DELIVERY_CORE
-    root = RESULTS_DIR / f".outbox{_INST_SUFFIX}"
-    if _DELIVERY_CORE is None or _DELIVERY_CORE.backend.root != root:
-        _DELIVERY_CORE = DeliveryCore(
+_WITHHELD_OUTBOX: "DeliveryCore | None" = None
+
+
+def _delivery_core(lane: str = "result") -> DeliveryCore:
+    """The one construction site of a delivery outbox: gateway results over idempotent
+    result POSTs, or an owner-released withheld result over an at-most-once room send."""
+    global _DELIVERY_CORE, _WITHHELD_OUTBOX
+    withheld = lane == "withheld"
+    root = RESULTS_DIR / (f".outbox-withheld-review{_INST_SUFFIX}" if withheld
+                          else f".outbox{_INST_SUFFIX}")
+    current = _WITHHELD_OUTBOX if withheld else _DELIVERY_CORE
+    if current is None or current.backend.root != root:
+        # Late-bound senders, so token rotation and a test's _req double reach them mid-process.
+        provider = (AG2SpaceRoomMessageProvider(lambda *a: _post_room_message(*a),
+                                                lambda *a: _record_release_receipt(*a)) if withheld
+                    else AG2SpaceResultProvider(lambda *a, **k: _req(*a, **k)))
+        current = DeliveryCore(
             DesignAClaimBackend(root, retry_schedule=RetrySchedule(), republish_delivered=False),
-            # Late-bound so token rotation reassigning module globals (and the
-            # test harness's _req double) reach the provider mid-process.
-            AG2SpaceResultProvider(lambda *a, **k: _req(*a, **k)),
+            provider,
             policy=RetryPolicy(max_attempts=MAX_TRANSIENT_ATTEMPTS,
-                               defer_idempotent_resend=True),
-            worker="gateway-result-drain")
-    return _DELIVERY_CORE
+                               defer_idempotent_resend=not withheld),
+            worker="withheld-review-publication" if withheld else "gateway-result-drain")
+        if withheld:
+            _WITHHELD_OUTBOX = current
+        else:
+            _DELIVERY_CORE = current
+    return current
 
 
 def _read_ready_generation(rfile) -> "tuple[str | None, ResultIdentity | None]":
