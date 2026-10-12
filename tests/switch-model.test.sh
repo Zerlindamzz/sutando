@@ -23,7 +23,7 @@ case " $* " in *" capture-pane "*)
   [ -n "${TMUX_NO_ACCEPT:-}" ] && { k=0; dlg=""; }
   # Render what the real CLI prints for each ACCEPTED send (display name, not id);
   # TMUX_ACCEPT_AS forces a different model's line; TMUX_PERSIST_SETTINGS mimics the CLI saving the pick.
-  disp() { case "$1" in claude-opus-5-1*) echo "Opus 5.1";; opus|claude-opus-5*) echo "Opus 5";; sonnet|claude-sonnet-5*) echo "Sonnet 5";; haiku|claude-haiku-4-5*) echo "Haiku 4.5";; fable|claude-fable-5-1*) echo "Fable 5.1";; default) echo "Default (recommended)";; *) echo "$1";; esac; }
+  disp() { case "$1" in claude-opus-5-1*) echo "Opus 5.1";; opus*|claude-opus-5*) echo "Opus 5";; sonnet*|claude-sonnet-5*) echo "Sonnet 5";; haiku*|claude-haiku-4-5*) echo "Haiku 4.5";; fable*|claude-fable-5-1*) echo "Fable 5.1";; default) echo "Default (recommended)";; *) echo "$1";; esac; }
   acc=""; i=0
   while [ "$i" -lt "$k" ]; do
     i=$((i+1)); sent="$(grep -- "-l /model" "$TMUX_LOG" | sed -n "${i}p" | sed 's/.*-l \/model //')"
@@ -123,4 +123,29 @@ rc=$(TMUX_FAIL_CAPTURE_N=3 run sonnet); [ "$rc" = 7 ] && ! grep -q -- "-l /model
 rm -f "$T/tmux.log.caps"
 # The capture counter must reset per run: run() truncates the log, so reset the counter with it.
 
-echo; [ $fails -eq 0 ] && echo "switch-model: all 33 checks pass" || { echo "switch-model: $fails FAILED"; exit 1; }
+# --- #4389: a picker the switch may leave on screen is attributed to it, and only while it can be
+GREC="$T/state/self-opened-gate.sutando-core.json"; rm -f "$GREC"
+rc=$(run haiku); [ "$rc" = 0 ] && [ ! -e "$GREC" ] && ok "34 accepted: the picker attribution is cleared" || fail "34" "rc=$rc $(ls "$T/state")"
+rc=$(TMUX_DIALOG=1 run opus); [ "$rc" = 6 ] && [ ! -e "$GREC" ] && ok "35 dialog cancelled by the script itself: attribution cleared" || fail "35" "rc=$rc"
+# The claim window must end within the 5s sighting slack of the exit, not run the full 32s.
+closed(){ python3 -c "import json,sys,time;d=json.load(open('$GREC'));sys.exit(0 if d['claim_window_s']<32 and d['opened_at']+d['claim_window_s']<=time.time()+0.01+$1 else 1)" 2>/dev/null; }
+rc=$(TMUX_NO_ACCEPT=1 run sonnet --accept-timeout 1); R=$(python3 -c "import json;d=json.load(open('$GREC'));print(d['opener'],d['kind'],d['dismiss_after_s'])" 2>/dev/null)
+[ "$rc" = 8 ] && [ "$R" = "model-switch selection 300.0" ] && grep -q "dismissed after 300s" "$T/err" && closed 5 \
+  && ok "36 no acceptance (picker may remain): attribution kept, delay from the manifest (300s), claim window closed at exit" || fail "36" "rc=$rc R=$R"
+rc=$(MODEL_SWITCH_PICKER_DISMISS_AFTER_S=90 TMUX_NO_ACCEPT=1 run sonnet --accept-timeout 1); R=$(python3 -c "import json;print(json.load(open('$GREC'))['dismiss_after_s'])" 2>/dev/null)
+[ "$rc" = 8 ] && [ "$R" = "90.0" ] && ok "37 env overrides the manifest delay" || fail "37" "rc=$rc R=$R"
+rc=$(MODEL_SWITCH_PICKER_DISMISS_AFTER_S=90 TMUX_NO_ACCEPT=1 run sonnet --accept-timeout 1 --picker-dismiss-after 0); R=$(python3 -c "import json;print(json.load(open('$GREC'))['dismiss_after_s'])" 2>/dev/null)
+[ "$rc" = 8 ] && [ "$R" = "0.0" ] && ok "38 --picker-dismiss-after overrides env (0 = never dismiss)" || fail "38" "rc=$rc R=$R"
+rm -f "$GREC"; rc=$(run haiku --dry-run); [ "$rc" = 0 ] && [ ! -e "$GREC" ] && ok "39 --dry-run writes no attribution" || fail "39" "rc=$rc"
+rm -f "$GREC"; rc=$(TMUX_DIALOG=1 TMUX_ACCEPT_AS=haiku run opus --confirm --accept-timeout 1)
+[ "$rc" = 8 ] && [ -e "$GREC" ] && closed 5 && ok "40 confirmed but not accepted: attribution kept, claim window closed at exit" || fail "40" "rc=$rc $(cat "$T/err")"
+
+# --- the menu's version-free family aliases carry the 1M tag
+rm -f "$T/state/model-switch.json"
+rc=$(run 'sonnet[1m]'); R=$(python3 -c "import json;print(json.load(open('$T/state/model-switch.json'))['model'])" 2>/dev/null)
+[ "$rc" = 0 ] && [ "$R" = "sonnet[1m]" ] && grep -q -- "-l /model sonnet\[1m\]" "$TMUX_LOG" && ok "41 a family alias with [1m] (sonnet[1m]) is sent and recorded as typed" || fail "41" "rc=$rc R=$R $(cat "$T/err")"
+rc=$(run 'fable[1m]'); [ "$rc" = 0 ] && ok "42 fable[1m] is matched against the CLI's display name (Fable 5.1)" || fail "42" "rc=$rc $(cat "$T/err")"
+bad=""; for m in 'sonnet[2m]' 'default[1m]' 'opusx' 'sonnet[1m]; rm -rf /' 'gpt[1m]'; do rc=$(run "$m"); [ "$rc" = 2 ] && ! grep -q send-keys "$TMUX_LOG" || bad="$bad $m:$rc"; done
+[ -z "$bad" ] && ok "43 garbage around an alias (sonnet[2m], default[1m], opusx, injected suffix, gpt[1m]) is refused (rc=2), nothing sent" || fail "43" "$bad"
+
+echo; [ $fails -eq 0 ] && echo "switch-model: all 43 checks pass" || { echo "switch-model: $fails FAILED"; exit 1; }

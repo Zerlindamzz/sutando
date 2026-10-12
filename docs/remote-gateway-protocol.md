@@ -29,6 +29,7 @@ lower-precedence candidate.
 | `REMOTE_TASK_TOKEN` | yes | — | Bearer token sent on every request. |
 | `REMOTE_TASK_PROVIDER` | no | `remote` | Label written as a task's `source:` when the task omits one. |
 | `REMOTE_TASK_POLL_WAIT` | no | `25` | Long-poll seconds requested per `/v1/tasks` call. |
+| `REMOTE_TASK_ON_TASK` | no | — | Wake command run once per newly queued task file. Split with `shlex` and run without a shell, the file path appended as the last argument; `SPARROW_TASK_ID` and `SPARROW_TASK_FILE` are set and every relay credential is removed from its environment. Sparrow does not wait for it, kill it, or retry it; a non-zero exit or a start failure is logged once. |
 | `REMOTE_TASK_TIER` | no | `owner` | Local access tier stamped on every inbound task; `owner` for the personal-agent model, set `team`/`guest` for a shared gateway (see Security); `other` is accepted as the legacy spelling of `guest`. |
 | `REMOTE_PROACTIVE_ROOM` *(.env too)* | no | — | The SYSTEM destination only. Owner-directed `results/proactive-*.txt` nudges and runtime prompt cards go to the gateway's `owner_dm_room` for this agent (`GET /v1/agents`), a reading kept identity-bound on disk (`state/owner-routing.json`) across restarts and outages and never replaced by an answer without one; with no reading yet they are HELD (file left in place, retried every 30 s, logged), never sent here. Unset → read from this instance's `channels/<dir>/.env`. A file naming its own room (`[channel: !room]`) never needs it; the drain runs whether or not it is set. |
 | `REMOTE_ALERT_ROOM` | no | none (gateway alert disabled) | Explicit owner-only room id for core-independent health alerts sent by the launchd fallback. Never inferred from last activity because that room may be shared. |
@@ -95,7 +96,7 @@ room-specific provider session.
 Claim/acknowledge a task so the server stops redelivering it.
 
 ```
-body: { "id": "task-123", "durable": true }
+body: { "id": "task-123", "lease_id": "<the served task's lease_id>", "durable": true }
 ```
 
 The client acks each task as it is accepted. A server with at-least-once
@@ -112,6 +113,10 @@ task is already queued and its durability could not be repaired. Acks that do
 not confirm are persisted and retried; a per-task `404 {"error": "not leased …"}`
 retires the retry for good, while a bare no-route 404/405 keeps the
 endpoint-unsupported cooldown.
+When the served task carries a `lease_id` (the broker's lease generation, fresh
+on every serve), the ack echoes it — also on a retry after a restart, since the
+pending-ack ledger keeps it — and a `404 {"reason": "stale lease generation"}`
+retires that ack the same way; a task served without one is acked without the key.
 
 ### `POST /v1/results`
 
@@ -119,7 +124,32 @@ Return a task's result.
 
 ```
 body: { "id": "task-123", "body": "<result text>" }
+body: { "id": "task-123", "body": "<result text>", "thread": "ask" }   // optional
 ```
+
+**`thread` (optional).** Defined by the broker in
+[ag2-space/ag2space-backend#2138](https://github.com/ag2-space/ag2space-backend/pull/2138).
+`"ask"` asks the broker to answer in a new thread rooted on the task's own asking
+message; no field names an event id, so a result can only open a thread on the
+message it was asked in. The broker:
+
+- answers an ask already in a thread in that thread, with or without the field;
+- ignores the field and posts a plain reply when the task has no source message,
+  the body redirects with `[channel:]`, or the ask cannot root a thread;
+- treats absent, `null` or `false` as today's placement;
+- answers `400 {"error": "invalid thread: ..."}` for any other value and records,
+  sends and completes nothing: the lease stays open.
+
+A broker that predates the field ignores it, so a client may send it before the
+broker supports it. The client sends only `"ask"`, and only on an ordinary
+(non-suppressed, non-redirected) task result whose leading lines carry a bare
+`[thread]` line (`src/result_markers.py`). Backend #2138 defines `"ask"` as valid,
+so a `400` (or any other refusal) of a result carrying it is a bug to investigate,
+not something the client degrades around: it parks like any other 4xx (below), with
+no re-post. A retryable failure re-sends the stored payload, field included. The
+field name and value live in one
+place on the client: `RESULT_THREAD_FIELD` / `RESULT_THREAD_ASK` in
+`packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py`.
 
 ### `POST /v1/heartbeat`
 
@@ -140,11 +170,25 @@ body: {
 understands the per-agent Collaborator control layered over Team. Gateways
 without it safely keep Team on their prior restricted path.
 
+When the gateway runs inside a Sutando checkout it adds the core's health row
+from [`GET /health`](health-snapshot.md) and the `worker_health.v1` capability:
+
+```
+"health": {"alive": true|false|null, "motion": "idle|moving|unknown",
+           "condition": "healthy|abnormal|unknown", "reason": "<slug>"|null,
+           "since": <unix seconds>|null}
+```
+
+`reason` is a slug of `[a-z0-9-]{1,40}`, not a closed set. `since` is for display;
+the broker times freshness by when it received the heartbeat. A change in the row
+sends the heartbeat at once, without waiting for the interval. A gateway with no
+Sutando checkout around it sends neither field.
+
 ### `POST /v1/workers` *(optional)*
 
 The worker pool this gateway fronts, pushed when the local advertisement's
-content changes and re-sent every 600 s so a relay that restarted with an empty
-copy heals without an operator. Sent only when the gateway finds a readable
+content changes and re-sent unchanged every 600 s (every 20 s when it carries
+health, see below), so a relay that restarted with an empty copy heals without an operator. Sent only when the gateway finds a readable
 advertisement; a gateway with no pool never calls it.
 
 ```
@@ -158,11 +202,23 @@ body: {
 success: 2xx, body ignored
 ```
 
+When the advertisement carries the per-worker report (`workers: [{id, state, …}]`),
+a gateway that sends `worker_health.v1` adds each non-retired worker's `health`
+row (the heartbeat's shape) and a top-level `suspended: {"reason", "at"} | null`,
+set while the owner has quit the app and the pool is paused. A health change
+pushes the report again even when the advertisement has not changed.
+
+A report carrying health is also re-sent, changed or not, whenever the last one
+is 20 s old, checked between polls. That keeps gaps under 60 s: the broker requires
+a health report at least every 60 s and marks worker rows stale 120 s after the
+last one it received. A body without health (the legacy snapshot, or a standalone
+sparrow with no health snapshot) keeps the 600 s re-send.
+
 ### `PUT /v1/agents/<mxid>/profile` *(optional)*
 
-The instance's identity card, pushed on the same change signal and cadence as
-the workers snapshot, from the same single read, so the two can never describe
-different revisions. `<mxid>` is percent-encoded as one path segment.
+The instance's identity card, pushed on the same change signal as the workers
+snapshot and from the same single read, so the two can never describe different
+revisions. Unchanged, it is re-sent every 600 s, not at the workers' 20 s refresh. `<mxid>` is percent-encoded as one path segment.
 
 ```
 body: {
@@ -248,6 +304,100 @@ than store a second copy.
   run twice.
 - A task whose `id` is already queued, claimed, or archived locally is dropped
   (idempotent write).
+
+### Recovering result POSTs after a gateway outage
+
+Ordinary task results use the shared outbox and a persisted retry schedule.
+The first claim starts a **10-minute elapsed window**. Retry delays are
+**2, 4, 8, 16, then 30 seconds**, capped at 30 seconds thereafter. These are
+minimum delays: the outbound drain's polling cadence and request duration can
+make an attempt later. Each eligible drain makes one result POST; an ambiguous
+response defers the idempotent resend to the next scheduled attempt. The answer
+and broker result ID remain the same. No agent task is created to regenerate
+an answer because its POST failed.
+
+HTTP 401/403 (while polling recovers authentication), 408, 425, 429, 5xx and
+transport failures are retryable. Other 4xx responses,
+malformed envelopes and explicit decline envelopes are permanent refusals and
+park on the first attempt. This policy applies to the gateway **task-result**
+leg only; proactive room sends and other providers keep their existing retry
+policy. Providers without an idempotent-send or reconciliation capability still
+park an ambiguous outcome rather than retrying it automatically.
+
+The outbox item stores its start, absolute deadline, next eligible time and
+failure count atomically under the delivery claim lock. A restart retains these
+values; time spent stopped consumes the window. At least five failed sends are
+required before expiry parks an answer, so sparse orphan sweeps and laptop sleep
+do not reduce recovery to a single attempt. Scheduling uses Unix wall time; clock
+adjustments can shorten or extend the window, while the minimum remains intact.
+A crashed claim owner is recovered by the existing owner-liveness/TTL protocol
+(up to its 300-second reclaim delay), without stealing an active sender's claim.
+An attempt already in progress at the deadline can finish. After the deadline,
+remaining minimum attempts still use backoff; further failures park the answer. Invalid schedule state parks visibly instead of
+silently granting a fresh budget.
+
+The gateway outbox preserves an accepted record when an unarchived result is
+seen again after a crash; it does not start another answer delivery cycle.
+If the broker redelivers an accepted task, the bridge re-ACKs it and POSTs a
+structured `no_send` lease-close control through a separate outbox item. The
+original accepted answer and receipt stay intact. Repeated redeliveries can
+start another control cycle; failed controls retain the usual bounded retry
+schedule. The broker must finalize duplicate results as well as fresh results
+for this control to clear a lingering lease. Retries use
+the originally published payload even if the caller rebuilds different text.
+Accepted re-ask aliases remain available so waiting dependents resolve the
+holder's broker receipt after its result is archived. Abandoned torn claims
+use the outbox's existing grace-period sweep; fresh torn claims remain guarded.
+
+Success means **accepted by the gateway**, including result-ID deduplication and
+closing its task lease. It does not establish downstream Matrix delivery.
+The outbox's historical `DELIVERED` label represents gateway acceptance for this
+provider. Logs explicitly say `accepted by gateway; Matrix delivery unconfirmed`.
+Pending logs include the next attempt and deadline; terminal records distinguish
+`retry-window-exhausted`, `permanent-refusal` and `invalid-retry-state`.
+
+After exhaustion or permanent refusal, the bridge retains the answer under
+`results/undelivered/` and logs the outbox recovery command. An operator can
+inspect the record and deliberately recover it with:
+
+```sh
+ag2-sparrow-outbox --root <results>/.outbox<instance-suffix> inspect <broker-result-id>
+ag2-sparrow-outbox --root <results>/.outbox<instance-suffix> requeue <broker-result-id> \
+  --reset-attempts --results-dir <results> --body-id <local-task-id>
+```
+
+`--reset-attempts` resets both the attempt count and elapsed retry schedule.
+Without it, an expired window stays expired. The operator action increments the
+outbox resend epoch, but the gateway envelope retains the same broker result ID.
+Inspect whether a reply was already manually sent before recovering it.
+Existing parked records and historical quarantined replies are **not** migrated
+or replayed automatically. Live nonterminal records without a schedule acquire
+one on their next claim.
+
+### Duplicates waiting for a holder's answer
+
+Gateway dedup recovery distinguishes an existing pending answer from gateway
+acceptance and failure. A compatible duplicate waits while its holder's answer
+is pending. Its dedup result and original in-flight ID persist until the holder
+is accepted, then its own broker lease closes with a suppressed result POST.
+The holder's existing outbox item provides delivery ownership and retry timing;
+concurrent dependent decisions do not create recovery aliases or additional
+agent tasks. The same durable files and receipt record reconstruct this state
+on restart. Archive location alone is not evidence of gateway acceptance.
+
+Compatibility requires matching task source, sender and room with readable
+holder provenance. A redirected holder answer cannot silently satisfy the
+original room. Cross-room and cross-sender dedups retain the bounded re-ask and
+report path. A genuinely missing or unusable holder also keeps the existing
+one-re-ask-per-lineage limit.
+
+A quarantined, exhausted or otherwise unverifiable existing answer requires
+operator recovery. Dependents receive a visible recovery report under each of
+their own broker IDs; they do not regenerate or replay the holder's answer.
+Report delivery itself uses the bounded gateway retry policy. An exhausted
+report remains retained for operator inspection. Acceptance is the strongest
+holder evidence available through the current result POST contract; this does
+not promise downstream Matrix delivery.
 
 ## Security
 
