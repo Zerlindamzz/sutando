@@ -5,6 +5,7 @@ archived decision. Drives the production guard + bridge functions with a fake re
 from __future__ import annotations
 
 import builtins
+import contextlib
 import io
 import json
 import os
@@ -584,6 +585,131 @@ for round_no in range(25):
           and (not winner_published or not kept_edits) and len(losers) == 1,
           f"race round {round_no}: status {record['status']}, {len(posts)} posts, "
           f"{len(kept_edits)} keep-private edits, {len(losers)} ignored replies")
+
+# 11. Stale router: while A's DM POST is paused, B routes and the owner's Yes commits;
+# A must not write awaiting_owner back, so a later No can never publish.
+bridge._STATE = root / "cas-router"
+guard.materialize_withheld_verdict(
+    leak, "SECRET-BODY", bridge._STATE, "task-cas",
+    {"source": "ag2space", "channel_id": SHARED, "user_id": "@team:example"},
+    "@agent:example", now=1000)
+path = guard.withheld_review_path(bridge._STATE, "task-cas")
+stage = {}
+
+
+def router_race_req(method, url, payload=None, timeout=35):
+    if ("paused" not in stage and url == "/v1/room" and payload.get("op") == "message"
+            and payload.get("room_id") == DM):
+        stage["paused"] = True
+        stage["b"] = bridge._route_withheld_review(path)
+        stage["yes"] = guard.claim_withheld_decision(path, dict(YES))
+    return fake_req(method, url, payload, timeout)
+
+
+bridge._req = router_race_req
+routed_a = bridge._route_withheld_review(path)
+bridge._req = fake_req
+record = json.loads(path.read_text())
+check(stage.get("b") is True and stage.get("yes") is not None and routed_a is True
+      and record["status"] == "kept_private" and record["decision"] == "sensitive",
+      f"stale router: the owner's keep-private stands, got {record['status']}")
+before = len(shared_posts())
+no_claim = guard.claim_withheld_decision(path, dict(NO))
+published = bridge._publish_review(path, {**record, **NO})
+bridge._retry_withheld_reviews()
+check(no_claim is None and published is False and len(shared_posts()) == before,
+      f"stale router: a later No neither claims nor publishes ({len(shared_posts()) - before} posts)")
+
+# 11b. Stale card: A's pending edit lands after the publication was shown and archived;
+# A's write is refused and A shows the archived outcome again.
+bridge._STATE = root / "cas-card"
+path, rid = new_review("task-cas-card")
+snapshot = dict(guard.claim_withheld_decision(path, dict(NO)))
+real_edit = bridge._edit_review_card
+
+
+def card_race_edit(stale):
+    bridge._edit_review_card = real_edit
+    fresh = json.loads(path.read_text())
+    stage["published"] = bridge._publish_review(path, fresh)
+    stage["b_resolved"] = bridge._resolve_review_card(path, fresh)
+    return real_edit(stale)
+
+
+mark = len(calls)
+bridge._edit_review_card = card_race_edit
+resolved_a = bridge._resolve_review_card(path, snapshot)
+bridge._edit_review_card = real_edit
+archived = path.parent / "archive" / path.name
+edits = card_edits_since(mark)
+check(stage.get("published") is True and stage.get("b_resolved") is True and resolved_a is False
+      and not path.exists() and json.loads(archived.read_text())["status"] == "published",
+      "stale card: the publication is archived and the stale resolver records nothing")
+check(len(edits) == 3 and "Published to the original room" in edits[-1],
+      f"stale card: the last card edit shows the archived outcome, not pending: {edits}")
+
+# 12. A proven archive beside a same-body copy whose id is reserved to another body is
+# not proven: zero card edits, and the copy is frozen in conflicts/.
+bridge._STATE = root / "reserved-other"
+directory = bridge._STATE / "withheld-team-results"
+(directory / "archive").mkdir(parents=True)
+live = directory / "wr_0000000000000000.json"
+(directory / "archive" / live.name).write_text(json.dumps({**card, "status": "kept_private",
+                                                          "decision": "sensitive"}))
+live.write_text(json.dumps({**card, **NO}))
+guard._reserve(live, guard._body_digest("ANOTHER-BODY"))
+legacy_bytes, mark = live.read_bytes(), len(calls)
+bridge._retry_withheld_reviews()
+held = list((directory / "conflicts").glob(f"{live.stem}.*.json"))
+check(card_edits_since(mark) == [] and not live.exists()
+      and not (directory / "archive" / "superseded").exists()
+      and any(p.read_bytes() == legacy_bytes for p in held),
+      "another body's reservation: no card edit, the copy is frozen in conflicts/")
+
+# 13. One lock: every decision read and write runs under the ledger lock, and the one
+# writer is only ever called while it is held.
+bridge._STATE = root / "one-lock"
+path, rid = new_review("task-one-lock")
+real_lock, real_writer = guard._ledger_lock, guard._write_owned_record
+held_depth, entered, unlocked_writes = [0], [], []
+
+
+@contextlib.contextmanager
+def recording_lock(directory):
+    with real_lock(directory):
+        held_depth[0] += 1
+        entered.append(True)
+        try:
+            yield
+        finally:
+            held_depth[0] -= 1
+
+
+def recording_writer(*args, **kwargs):
+    if held_depth[0] == 0:
+        unlocked_writes.append(args[0])
+    return real_writer(*args, **kwargs)
+
+
+guard._ledger_lock, guard._write_owned_record = recording_lock, recording_writer
+try:
+    for name, call in (
+            ("claim", lambda: guard.claim_withheld_decision(path, dict(NO))),
+            ("publishable", lambda: guard.withheld_claim_publishable(
+                path, json.loads(path.read_text())["decision_claim_id"])),
+            ("archived read", lambda: guard.archived_withheld_decision(path)),
+            ("proven check", lambda: guard.proven_superseded_record(path)),
+            ("retire", lambda: guard.retire_superseded_record(path)),
+            ("update", lambda: guard.update_record(
+                path, json.loads(path.read_text()),
+                expect=guard.record_version(json.loads(path.read_text()))))):
+        entered.clear()
+        call()
+        check(entered, f"one lock: {name} runs under the ledger lock")
+finally:
+    guard._ledger_lock, guard._write_owned_record = real_lock, real_writer
+check(unlocked_writes == [], f"one lock: the writer ran without the lock: {unlocked_writes}")
+bridge._STATE = root / "state"
 
 builtins.open, io.open, os.open = _real_open, _real_io_open, _real_os_open
 check(bridge.TOKEN == "dummy-test-token", "the bridge took the test token, not a host one")

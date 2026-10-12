@@ -1412,7 +1412,8 @@ class TerminalResultMovedOnce(unittest.TestCase):
         self.assertEqual([json.loads(p.read_text())['withheld_body'] for p in frozen], ['BODY-C'])
         self.assertFalse(old.exists())
         self.assertFalse(trg.archive_record(old))
-        self.assertFalse(trg.update_record(old, dict(b, status='published')))
+        self.assertFalse(trg.update_record(old, dict(b, status='published'),
+                                              expect=trg.record_version(b)))
         self.assertEqual(json.loads((hot / 'archive' / old.name).read_text()), b, "B's decision changed")
         self.assertTrue(any('frozen' in l for l in self.lines), self.lines)
         with patch.object(gw.team_result_guard, 'actionable_records', side_effect=OSError(5, 'EIO')):

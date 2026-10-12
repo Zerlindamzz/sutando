@@ -834,6 +834,7 @@ def _route_withheld_review(path: Path) -> bool:
         return False
     if record.get("status") != "pending_dm":
         return True
+    version = team_result_guard.record_version(record)
     owner = _gateway_owner()
     if not owner:
         raise RuntimeError("gateway returned no registered owner")
@@ -857,8 +858,12 @@ def _route_withheld_review(path: Path) -> bool:
     record.update({"status": "awaiting_owner", "owner": owner, "dm_room_id": room,
                    "dm_event_id": str(answer.get("event_id") or ""),
                    "dm_sent_at": time.time()})
-    team_result_guard.update_record(path, record)
-    return True
+    if team_result_guard.update_record(path, record, expect=version):
+        return True
+    # Another writer moved the record on while the DM was in flight; its state stands.
+    current = _read_private_json(path) or {}
+    _log(f"withheld review {path.stem}: routed copy is stale; keeping {current.get('status')}")
+    return current.get("status") not in (None, "pending_dm")
 
 
 _REVIEW_DECISION_RE = re.compile(
@@ -948,7 +953,14 @@ def _released_review_body(raw: str) -> str:
 _REFUSED_REVIEW_PUBLICATIONS: set = set()
 
 
+def _stale_review_write(path: Path, step: str) -> None:
+    current = _read_private_json(path) or {}
+    _log(f"withheld review {path.stem}: {step} not recorded, the record changed meanwhile "
+         f"(now {current.get('status')}); the next beat retries from it")
+
+
 def _publish_review(path: Path, record: dict) -> bool:
+    version = team_result_guard.record_version(record)
     if not team_result_guard.withheld_claim_publishable(path, record.get("decision_claim_id")):
         if str(path) not in _REFUSED_REVIEW_PUBLICATIONS:
             _REFUSED_REVIEW_PUBLICATIONS.add(str(path))
@@ -961,7 +973,8 @@ def _publish_review(path: Path, record: dict) -> bool:
     if not room.startswith("!") or not body:
         record.update({"status": "publish_failed", "publish_error": "invalid origin/body",
                        "card_resolution_pending": True})
-        team_result_guard.update_record(path, record)
+        if not team_result_guard.update_record(path, record, expect=version):
+            _stale_review_write(path, "publication failure")
         return False
     answer = _req("POST", "/v1/room", {
         "op": "message", "room_id": room, "body": body,
@@ -972,7 +985,9 @@ def _publish_review(path: Path, record: dict) -> bool:
     record.update({"status": "published", "published_at": time.time(),
                    "published_event_id": str(answer.get("event_id") or ""),
                    "card_resolution_pending": True})
-    team_result_guard.update_record(path, record)
+    if not team_result_guard.update_record(path, record, expect=version):
+        _stale_review_write(path, "publication")
+        return False
     return True
 
 
@@ -1032,15 +1047,30 @@ def _defers_to_archive(path: Path) -> bool:
 def _resolve_review_card(path: Path, record: dict) -> bool:
     if _defers_to_archive(path):
         return False
+    version = team_result_guard.record_version(record)
     answer = _edit_review_card(record)
     if answer is None:
         return False
     record.update({"card_resolution_pending": False,
                    "card_resolved_at": time.time(),
                    "card_resolution_event_id": str(answer.get("event_id") or "")})
-    team_result_guard.update_record(path, record)
+    if not team_result_guard.update_record(path, record, expect=version):
+        _stale_review_write(path, "card resolution")
+        _reshow_current_card(path)
+        return False
     _archive_resolved_review(path, record)
     return True
+
+
+def _reshow_current_card(path: Path) -> None:
+    """A stale card edit may land after the edit for a newer state; show the current
+    one again. A live record still pending its card is left to the retry beat."""
+    archived = path.parent / "archive" / path.name
+    current = _read_private_json(archived if archived.is_file() else path)
+    if not current or (not archived.is_file() and current.get("card_resolution_pending")):
+        return
+    if _edit_review_card(current) is None:
+        _log(f"withheld review {path.stem}: card may show a superseded state; edit failed")
 
 
 def _handle_hitl_action(task: dict):

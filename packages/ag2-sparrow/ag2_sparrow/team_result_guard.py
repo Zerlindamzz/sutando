@@ -411,21 +411,37 @@ def _owns_its_id(path: Path, field: str) -> bool:
             and _issued_to(path, field) == _record_digest(path, field))
 
 
-def update_record(path: Path, record: dict, field: str = "withheld_body") -> bool:
-    """Rewrite a live record under the ledger lock, only while it owns its id: a
-    record already archived, never written, or conflicting with its id's
-    reservation is left alone, so no update recreates or overwrites a decision."""
+_VERSION_KEYS = ("status", "decision_claim_id", "generation")
+
+
+def record_version(record) -> dict:
+    """The compare-and-set key of a record snapshot: what a writer read it as."""
+    record = record if isinstance(record, dict) else {}
+    return {key: record.get(key, 0 if key == "generation" else None) for key in _VERSION_KEYS}
+
+
+def update_record(path: Path, record: dict, field: str = "withheld_body", *,
+                  expect: dict) -> bool:
+    """Rewrite a live record under the ledger lock, only while it owns its id and is
+    still the version `expect` names: a stale snapshot never overwrites a newer one."""
     path = Path(path)
     with _ledger_lock(_record_directory(path)):
-        return _write_owned_record(path, record, field)
+        return _write_owned_record(path, record, field, expect)
 
 
-def _write_owned_record(path: Path, record: dict, field: str) -> bool:
+def _write_owned_record(path: Path, record: dict, field: str, expect: dict) -> bool:
     """The one writer of a live record; the caller holds the ledger lock. Refuses a
-    record that does not own its id or would change the body it holds."""
-    if not path.is_file() or not _owns_its_id(path, field) or record.get(field) != json.loads(
-            path.read_text(encoding="utf-8")).get(field):
+    record that does not own its id, would change its body, or changed since read."""
+    if not path.is_file() or not _owns_its_id(path, field):
         return False
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if (not isinstance(current, dict) or record.get(field) != current.get(field)
+            or record_version(current) != expect):
+        return False
+    record["generation"] = int(current.get("generation") or 0) + 1
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         if os.name != "nt":
@@ -734,7 +750,8 @@ def _proven_superseded(path: Path, field: str) -> bool:
         return False
     digest = _record_digest(path, field)
     return (archived_outcome(decision) is not None and digest != "unreadable"
-            and digest == _record_digest(archived, field))
+            and digest == _record_digest(archived, field)
+            and _issued_to(path, field) == digest)
 
 
 def proven_superseded_record(path: Path, field: str = "withheld_body") -> bool:
@@ -775,8 +792,9 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
                 os.fsync(directory)
             finally:
                 os.close(directory)
+        expect = record_version(record)
         record.update(updates, decision_claim_id=claim_id)
-        return record if _write_owned_record(path, record, "withheld_body") else None
+        return record if _write_owned_record(path, record, "withheld_body", expect) else None
 
 
 def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:
