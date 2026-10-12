@@ -134,6 +134,12 @@
    "file": "src/policy/egress/result.py",
    "old": "                    follow_symlinks=False)               # no-clobber: an existing file stays",
    "new": "                    follow_symlinks=True)"
+  },
+  {
+   "name": "the record open blocks on a FIFO and accepts any file type",
+   "file": "src/policy/egress/result.py",
+   "old": "    flags = (os.O_RDONLY | getattr(os, \"O_NOFOLLOW\", 0) | getattr(os, \"O_NONBLOCK\", 0)\n             | getattr(os, \"O_CLOEXEC\", 0))",
+   "new": "    flags = os.O_RDONLY | getattr(os, \"O_NOFOLLOW\", 0)\n    _regular_only = lambda fd: fd  # noqa: E731"
   }
  ]
 }

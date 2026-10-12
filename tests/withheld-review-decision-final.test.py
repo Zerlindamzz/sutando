@@ -13,6 +13,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -2426,6 +2427,50 @@ moved_copy = namespace / "archive" / "wr_3.json"
 check(not (moved_copy.exists() and not moved_copy.is_symlink()
            and os.stat(moved_copy).st_ino == os.stat(bridge._STATE / "outside-record.json").st_ino),
       "a source swapped for a link is never followed into the namespace")
+
+# A FIFO where a record belongs (archived or live) is unknown and never blocks the read, even with
+# the walk's own regular-file check out of the way: the open itself refuses it.
+class Hung(BaseException):
+    pass
+
+
+def bounded(call, seconds=5):
+    def on_alarm(_signum, _frame):
+        raise Hung()
+    previous = signal.signal(signal.SIGALRM, on_alarm)
+    signal.alarm(seconds)
+    try:
+        call()
+        return "read"
+    except OSError:
+        return "unknown"
+    except Hung:
+        return "hung"
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+bridge._STATE = root / "fifo-records"
+path, rid = new_review("task-fifo-records")
+(path.parent / "archive").mkdir(mode=0o700)
+fifos = {"archived": path.parent / "archive" / "wr_ffff000000000000.json",
+         "live": path.parent / "wr_ffff000000000001.json"}
+for fifo in fifos.values():
+    os.mkfifo(fifo)
+outcomes, real_present = {}, guard.present
+for label, fifo in fifos.items():
+    outcomes[label] = bounded(lambda: guard.read_json_strict(fifo))
+    guard.present = lambda _p, _k=None: True
+    try:
+        outcomes[f"{label}-without-the-walk-check"] = bounded(lambda: guard.read_json_strict(fifo))
+    finally:
+        guard.present = real_present
+reported = {p for p, _reason in guard.namespace_problems(path.parent)}
+check(set(outcomes.values()) == {"unknown"} and set(fifos.values()) <= reported,
+      f"a FIFO record is unknown and never hangs a read: {outcomes}")
+for fifo in fifos.values():
+    fifo.unlink()
 
 # A final .issued reservation that is a link makes the reply unknown, never "no matching review".
 bridge._STATE = root / "reservation-leaf-linked"

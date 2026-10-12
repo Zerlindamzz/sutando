@@ -445,14 +445,23 @@ def read_strict(path: Path) -> str:
 
 def _open_no_follow(path: Path) -> int:
     path = path if isinstance(path, Path) else Path(path)
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_CLOEXEC", 0))
     if not hasattr(os, "O_DIRECTORY"):  # no dir_fd walk on this platform: the leaf alone
-        return os.open(path, os.O_RDONLY | nofollow)
+        return _regular_only(os.open(path, flags))
     fd = _open_dir(path.parent)
     try:
-        return os.open(path.name, os.O_RDONLY | nofollow, dir_fd=fd)
+        return _regular_only(os.open(path.name, flags, dir_fd=fd))
     finally:
         os.close(fd)
+
+
+def _regular_only(fd: int) -> int:
+    # Opened non-blocking, so a FIFO cannot hang the open; anything but a regular file is refused.
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError("not a regular file")
+    return fd
 
 
 def _open_dir(directory: Path) -> int:
