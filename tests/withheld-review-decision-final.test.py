@@ -13,6 +13,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1932,7 +1933,7 @@ check(raised is None and handled is True
 @contextlib.contextmanager
 def unreadable_like_314(target, stat=True, listing=False):
     target = pathlib.Path(target)
-    real = {"stat": os.stat, "listdir": os.listdir, "scandir": os.scandir}
+    real = {"stat": os.stat, "lstat": os.lstat, "listdir": os.listdir, "scandir": os.scandir}
     swallowed = {name: getattr(pathlib.Path, name) for name in ("exists", "is_file", "is_dir")}
 
     def refusing(name, inside):
@@ -1953,7 +1954,7 @@ def unreadable_like_314(target, stat=True, listing=False):
         return check
 
     if stat:
-        os.stat = refusing("stat", inside=True)
+        os.stat, os.lstat = refusing("stat", inside=True), refusing("lstat", inside=True)
     if listing:
         os.listdir, os.scandir = refusing("listdir", False), refusing("scandir", False)
     for name, method in swallowed.items():
@@ -1961,7 +1962,8 @@ def unreadable_like_314(target, stat=True, listing=False):
     try:
         yield
     finally:
-        os.stat, os.listdir, os.scandir = real["stat"], real["listdir"], real["scandir"]
+        os.stat, os.lstat = real["stat"], real["lstat"]
+        os.listdir, os.scandir = real["listdir"], real["scandir"]
         for name, method in swallowed.items():
             setattr(pathlib.Path, name, method)
 
@@ -2026,14 +2028,21 @@ for label, make_unreadable in variants:
     check(published is False and len(shared_posts()) == before,
           f"{label}: once readable, the kept-private decision still wins: no POST")
 
-# 25s. Each existence check on a decision path reads unknown as unknown, under the same 3.14
-# emulation (a refused stat, or a refused listing that glob() would read as empty).
+# 25s. Each converted existence check reads unknown as unknown, never as absent: under the 3.14
+# emulation (a refused stat or listing), or a symlink or wrong kind where a real entry belongs.
 def raises_unknown(call):
     try:
         call()
     except OSError:
         return True
     return False
+
+
+def refuses(call):
+    try:
+        return call() is False
+    except Exception:  # noqa: BLE001
+        return False
 
 
 FIELD = "withheld_body"
@@ -2044,20 +2053,16 @@ archive_dir.mkdir(mode=0o700)
 (archive_dir / path.name).write_text(json.dumps({**json.loads(path.read_text()), **YES}))
 digest = guard._record_digest(path, FIELD)
 reservation = path.parent / "issued" / f"{path.stem}.issued"
+site = {}
 with unreadable_like_314(archive_dir):
-    site = {
-        "live-undecided": raises_unknown(lambda: guard._live_undecided_record(path)),
-        "owns-id": raises_unknown(lambda: guard._owns_its_id(path, FIELD)),
-        "archived-decision": guard.archived_withheld_decision(path) == {},
-        "record-of": raises_unknown(lambda: guard._record_of(path, digest, FIELD)),
-        "superseded": raises_unknown(lambda: guard._proven_superseded(path, FIELD)),
-        "bridge-archived-reply": raises_unknown(
-            lambda: bridge._archived_reply(path.with_name("wr_ffffffffffffffff.json"))),
-    }
-    try:
-        site["archive-refuses"] = guard.archive_record(path) is False and path.exists()
-    except Exception:  # noqa: BLE001
-        site["archive-refuses"] = False
+    site["live-undecided"] = raises_unknown(lambda: guard._live_undecided_record(path))
+    site["owns-id"] = raises_unknown(lambda: guard._owns_its_id(path, FIELD))
+    site["archived-decision"] = guard.archived_withheld_decision(path) == {}
+    site["record-of"] = raises_unknown(lambda: guard._record_of(path, digest, FIELD))
+    site["superseded"] = raises_unknown(lambda: guard._proven_superseded(path, FIELD))
+    site["bridge-archived-reply"] = raises_unknown(
+        lambda: bridge._archived_reply(path.with_name("wr_ffffffffffffffff.json")))
+    site["archive-record-refuses"] = refuses(lambda: guard.archive_record(path)) and path.exists()
     saved_reservation = reservation.read_text()
     reservation.unlink()
     try:
@@ -2082,22 +2087,128 @@ with unreadable_like_314(path):
     site["reread"] = raises_unknown(lambda: bridge._reread_record(path))
 bridge._read_private_json = real_read
 with unreadable_like_314(path.parent, stat=False, listing=True):
-    site["freeze-scan"] = raises_unknown(lambda: guard.actionable_records(path.parent))
+    site["actionable-listing"] = raises_unknown(lambda: guard.actionable_records(path.parent))
+
+# A symlink where a real record or directory belongs: present() refuses it on any Python.
+bridge._STATE = root / "site-links"
+linked, linked_rid = new_review("task-site-links")
+real_copy = linked.with_name("real-copy.json")
+real_copy.write_bytes(linked.read_bytes())
+linked.unlink()
+linked.symlink_to(real_copy.name)
+version = guard.record_version(json.loads(real_copy.read_text()))
+site["write-owned-refuses"] = (refuses(lambda: guard.update_record(
+    linked, dict(json.loads(real_copy.read_text()), note="x"), expect=version)) and linked.is_symlink())
+site["archive-record-symlink"] = refuses(lambda: guard.archive_record(linked)) and linked.is_symlink()
+site["write-artifact"] = raises_unknown(lambda: guard._write_artifact(
+    linked, json.loads(real_copy.read_text()), FIELD))
+review_dir = linked.parent
+moved = review_dir.with_name("withheld-team-results-real")
+review_dir.rename(moved)
+review_dir.symlink_to(moved.name)
+try:
+    site["actionable-dir"] = raises_unknown(lambda: guard.actionable_records(review_dir))
+    site["find-record"] = raises_unknown(lambda: guard.withheld_review_artifact(
+        bridge._STATE, "task-site-links", "SECRET-BODY"))
+finally:
+    review_dir.unlink()
+    moved.rename(review_dir)
+
+# A claims/ entry of the wrong kind: the ledger listings never read it as "no claim".
+bridge._STATE = root / "site-claims"
 fresh, _fresh_rid = new_review("task-site-claims")
 claims_dir = fresh.parent / "claims"
-claims_dir.mkdir(mode=0o700, exist_ok=True)
-claims_before = sorted(claims_dir.iterdir())
-with unreadable_like_314(claims_dir, stat=False, listing=True):
-    site["orphan-claim"] = raises_unknown(lambda: guard.claim_withheld_decision(fresh, dict(NO)))
-site["orphan-claim"] = (site["orphan-claim"] and sorted(claims_dir.iterdir()) == claims_before
+shutil.rmtree(claims_dir, ignore_errors=True)
+claims_dir.write_text("not a directory")
+site["orphan-claim"] = (raises_unknown(lambda: guard.claim_withheld_decision(fresh, dict(NO)))
                         and json.loads(fresh.read_text())["status"] == "awaiting_owner")
+site["issued-claims"] = raises_unknown(lambda: guard.issued_claims(fresh))
+site["decision-lost"] = raises_unknown(lambda: guard.decision_lost(fresh))
+claims_dir.unlink()
 claimed_path, _claimed_rid = new_review("task-site-ledger")
 ledger_claim = guard.claim_withheld_decision(claimed_path, dict(NO))["decision_claim_id"]
 with unreadable_like_314(claimed_path.parent / "claims"):
     site["claim-ledger"] = raises_unknown(
         lambda: guard.withheld_claim_publishable(claimed_path, ledger_claim))
-check(all(site.values()), f"every decision-path existence check reads unknown as unknown: "
+check(all(site.values()), f"every converted existence check reads unknown as unknown: "
                           f"{sorted(k for k, ok in site.items() if not ok)} did not")
+
+# 25u. A malformed decision namespace (each kind below) is unknown: through the production paths
+# nothing posts and the record is never marked published.
+def break_namespace(kind, path):
+    directory = path.parent
+    if kind == "archive-is-file":
+        (directory / "archive").write_text("not a directory")
+    elif kind == "archive-record-dangling":
+        (directory / "archive").mkdir(mode=0o700)
+        (directory / "archive" / path.name).symlink_to("missing-target.json")
+    elif kind == "archive-dir-dangling":
+        (directory / "archive").symlink_to("missing-archive-dir")
+    elif kind == "record-is-directory":
+        path.unlink()
+        path.mkdir()
+    elif kind == "issued-is-file":
+        shutil.rmtree(directory / "issued")
+        (directory / "issued").write_text("not a directory")
+
+
+for kind in ("archive-is-file", "archive-record-dangling", "archive-dir-dangling",
+             "record-is-directory", "issued-is-file"):
+    path, rid, claimed, room_req = release(f"ns-{kind}", lambda: {"event_id": "$ns-leak"})
+    break_namespace(kind, path)
+    before, raised = len(shared_posts()), []
+    for step in (lambda: bridge._publish_review(path, claimed),
+                 bridge._retry_withheld_reviews,
+                 lambda: bridge._handle_review_decision(decision("No", rid, f"ns-{kind}"))):
+        bridge._req = room_req
+        try:
+            step()
+        except OSError as exc:
+            raised.append(type(exc).__name__)
+        finally:
+            bridge._req = fake_req
+    status = json.loads(path.read_text()).get("status") if path.is_file() else None
+    archived_ok = not (path.parent / "archive").is_dir() or not any(
+        json.loads(p.read_text()).get("status") == "published"
+        for p in (path.parent / "archive").glob("*.json") if p.is_file())
+    check(len(shared_posts()) == before and status != "published" and archived_ok
+          and "reply again" in control_body(f"ns-{kind}"),
+          f"{kind}: nothing posts, nothing is marked published, the reply is answered "
+          f"({len(shared_posts()) - before} POST(s), status {status}, gate raised {raised})")
+
+# 25v. The absence rule itself: only a genuinely missing entry below a real, readable directory
+# is absent; a symlink, a wrong kind, a non-directory parent or a dangling link raises.
+scratch = root / "absence"
+scratch.mkdir()
+(scratch / "file").write_text("x")
+(scratch / "dir").mkdir()
+(scratch / "link-to-file").symlink_to("file")
+(scratch / "dangling").symlink_to("missing")
+(scratch / "dangling-dir").symlink_to("missing-dir")
+rule = {
+    "missing": guard.present(scratch / "missing") is False,
+    "missing-chain": guard.present(scratch / "a" / "b" / "c.json") is False,
+    "file": guard.present(scratch / "file", stat.S_IFREG) is True,
+    "dir": guard.present(scratch / "dir", stat.S_IFDIR) is True,
+    "file-as-dir": raises_unknown(lambda: guard.present(scratch / "file", stat.S_IFDIR)),
+    "dir-as-file": raises_unknown(lambda: guard.present(scratch / "dir", stat.S_IFREG)),
+    "symlink": raises_unknown(lambda: guard.present(scratch / "link-to-file")),
+    "dangling": raises_unknown(lambda: guard.present(scratch / "dangling")),
+    "below-a-file": raises_unknown(lambda: guard.present(scratch / "file" / "x.json")),
+    "below-dangling-dir": raises_unknown(lambda: guard.present(scratch / "dangling-dir" / "x.json")),
+    "entries-missing": guard.entries(scratch / "missing", "*") == [],
+    "entries-file": raises_unknown(lambda: guard.entries(scratch / "file", "*")),
+    "entries-dangling-dir": raises_unknown(lambda: guard.entries(scratch / "dangling-dir", "*")),
+    "entries-listed": guard.entries(scratch, "f*") == [scratch / "file"],
+}
+if os.geteuid() != 0:
+    (scratch / "closed").mkdir()
+    os.chmod(scratch / "closed", 0o300)
+    try:
+        rule["below-unreadable"] = raises_unknown(lambda: guard.present(scratch / "closed" / "x"))
+    finally:
+        os.chmod(scratch / "closed", 0o700)
+check(all(rule.values()), f"the absence rule: {sorted(k for k, ok in rule.items() if not ok)} broke")
 
 # 25t. A review record that reads but is not a record (archived, live, or frozen into
 # conflicts/) is unknown: the owner's reply is answered "please reply again", never ordinary work.
@@ -2122,7 +2233,9 @@ for kind, content in enumerate(MALFORMED):
             raised, handled = None, bridge._handle_review_decision(decision("No", rid, label))
         except Exception as exc:  # noqa: BLE001
             raised, handled = exc, None
+        named = path.stem in control_body(label)
         check(raised is None and handled is True and "please reply again" in control_body(label)
+              and named
               and len(shared_posts()) == before and (where != "conflicts" or len(frozen) == 1),
               f"{label}: a record that is not a record makes the reply unknown, answered "
               f"(handled={handled}, raised={raised!r}, frozen={len(frozen)})")

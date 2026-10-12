@@ -237,5 +237,43 @@ class OutboxParkedProbe(unittest.TestCase):
         self.assertIn("checks.append(check_outbox_parked())", src)
 
 
+class WithheldReviewsReadable(unittest.TestCase):
+    def setUp(self):
+        self.hc = _load_health_check()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ws = Path(self.tmp.name)
+        self.base = self.ws / "state" / "withheld-team-results"
+        (self.base / "conflicts").mkdir(parents=True)
+
+    def test_no_reviews_is_ok(self):
+        self.assertEqual(self.hc.check_withheld_reviews_readable(self.ws)["status"], "ok")
+
+    def test_records_that_read_are_ok(self):
+        (self.base / "wr_0000000000000001.json").write_text(json.dumps({"status": "awaiting_owner"}))
+        self.assertEqual(self.hc.check_withheld_reviews_readable(self.ws)["status"], "ok")
+
+    def test_each_unreadable_record_is_named(self):
+        frozen = self.base / "conflicts" / "wr_0000000000000002.abcd.json"
+        for content in ("{not json", "[]", '"str"', ""):
+            with self.subTest(content=content):
+                frozen.write_text(content)
+                r = self.hc.check_withheld_reviews_readable(self.ws)
+                self.assertEqual(r["status"], "warn")
+                self.assertIn("withheld-team-results/conflicts/wr_0000000000000002.abcd.json", r["detail"])
+                self.assertIn("please reply again", r["detail"])
+
+    def test_a_symlinked_record_is_named(self):
+        (self.base / "archive").mkdir()
+        (self.base / "archive" / "wr_0000000000000003.json").symlink_to("missing.json")
+        r = self.hc.check_withheld_reviews_readable(self.ws)
+        self.assertEqual(r["status"], "warn")
+        self.assertIn("archive/wr_0000000000000003.json", r["detail"])
+
+    def test_the_check_is_registered(self):
+        source = (REPO / "src" / "health-check.py").read_text()
+        self.assertIn("checks.append(check_withheld_reviews_readable())", source)
+
+
 if __name__ == "__main__":
     unittest.main()

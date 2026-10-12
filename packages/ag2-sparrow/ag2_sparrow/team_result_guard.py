@@ -414,22 +414,39 @@ def _owns_its_id(path: Path, field: str) -> bool:
 
 
 def present(path: Path, kind: "int | None" = None) -> bool:
-    """Absent is False; unreadable raises OSError. exists(), is_file() and is_dir() read an
-    unreadable path as absent on some Pythons, which must never let a record act."""
+    """True when `path` is there as `kind`; False only when it is genuinely absent (see _absent).
+    A symlink, a wrong kind or any other error is unknown and raises OSError, never reads absent."""
+    path = path if isinstance(path, Path) else Path(path)
     try:
-        mode = os.stat(path).st_mode
-    except (FileNotFoundError, NotADirectoryError):
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        _absent(path)
         return False
-    return kind is None or stat.S_IFMT(mode) == kind
+    if stat.S_ISLNK(mode) or (kind is not None and stat.S_IFMT(mode) != kind):
+        raise OSError(f"{path}: not a {'symlink-free path' if kind is None else 'path of its kind'}")
+    return True
+
+
+def _absent(path: Path) -> None:
+    # Absent only below a real, readable directory, every missing step missing for real.
+    for ancestor in path.parents:
+        try:
+            mode = os.lstat(ancestor).st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(mode) or not os.access(ancestor, os.R_OK | os.X_OK):
+            raise OSError(f"{path}: {ancestor} is not a readable directory")
+        return
+    raise OSError(f"{path}: no existing ancestor")
 
 
 def entries(directory: Path, pattern: str) -> list:
-    """The names under `directory` matching `pattern`; [] only when it is absent, unlike glob()."""
-    try:
-        names = os.listdir(directory)
-    except (FileNotFoundError, NotADirectoryError):
+    """The names under `directory` matching `pattern`; [] only when it is genuinely absent."""
+    if not present(directory, stat.S_IFDIR):
         return []
-    return sorted(Path(directory) / name for name in names if fnmatch.fnmatchcase(name, pattern))
+    directory = directory if isinstance(directory, Path) else Path(directory)
+    return sorted(directory / name for name in os.listdir(directory)
+                  if fnmatch.fnmatchcase(name, pattern))
 
 
 _VERSION_KEYS = ("status", "decision_claim_id", "generation")

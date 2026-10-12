@@ -9756,6 +9756,37 @@ def check_a_fallback_hits(workspace_dir: Optional[Path] = None) -> dict:
 
 
 
+def check_withheld_reviews_readable(workspace_dir: Optional[Path] = None) -> dict:
+    """A withheld-review record the bridge cannot read as a record makes every owner Yes/No
+    in the DM answer "please reply again" until it is inspected or removed."""
+    name = "withheld-reviews-readable"
+    base = Path(workspace_dir or WORKSPACE_DIR) / "state" / "withheld-team-results"
+    bad: list[str] = []
+    for folder in (base, base / "conflicts", base / "archive"):
+        try:
+            names = sorted(n for n in os.listdir(folder) if n.startswith("wr_") and n.endswith(".json"))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            bad.append(f"{folder.relative_to(base.parent.parent)}/ ({exc.strerror or exc})")
+            continue
+        for entry in names:
+            path = folder / entry
+            try:
+                ok = (not path.is_symlink()
+                      and isinstance(json.loads(path.read_text(encoding="utf-8")), dict))
+            except (OSError, ValueError):
+                ok = False
+            if not ok:
+                bad.append(str(path.relative_to(base.parent.parent)))
+    if bad:
+        shown = ", ".join(bad[:4]) + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else "")
+        return {"name": name, "status": "warn",
+                "detail": f"{len(bad)} withheld-review record(s) unreadable; owner replies get "
+                          f"'please reply again' until each is inspected or removed: {shown}"}
+    return {"name": name, "status": "ok", "detail": "every withheld-review record reads"}
+
+
 def check_outbox_parked(workspace_dir: Optional[Path] = None) -> dict:
     """A PARKED outbound item is a reply the owner never received, and nothing
     retries it: `outbox_cli`'s own header calls PARKED a durable terminal state
@@ -13415,6 +13446,7 @@ def run_all_checks() -> list[dict]:
     checks.append(check_task_claim_age())
     checks.append(check_a_fallback_hits())
     checks.append(check_outbox_parked())
+    checks.append(check_withheld_reviews_readable())
     checks.append(check_codex_task_notifier())
     checks.append(check_claude_task_notifier())
     checks.append(check_codex_presence())

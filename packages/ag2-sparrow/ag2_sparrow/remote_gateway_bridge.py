@@ -875,6 +875,10 @@ _REVIEW_DECISION_RE = re.compile(
 class _ReviewsUnreadable(Exception):
     """The reviews could not be inspected, which is not the same as no review matching."""
 
+    def __init__(self, reason, record: str = ""):
+        super().__init__(reason)
+        self.record = record  # the review file to inspect, relative to the state directory
+
 
 def _pending_review_records(strict: bool = False) -> list[tuple[Path, dict]]:
     """Live reviews that own their id; the guard freezes any that conflict with
@@ -930,10 +934,7 @@ def _decision_text(task: dict) -> str:
 
 def _review_paths(directory: Path, strict: bool) -> list[Path]:
     try:
-        return sorted(Path(entry.path) for entry in os.scandir(directory)
-                      if entry.name.startswith("wr_") and entry.name.endswith(".json"))
-    except FileNotFoundError:
-        return []
+        return team_result_guard.entries(directory, "wr_*.json")
     except OSError as exc:
         if strict:
             raise _ReviewsUnreadable(exc) from exc
@@ -942,12 +943,15 @@ def _review_paths(directory: Path, strict: bool) -> list[Path]:
 
 def _load_review(path: Path) -> dict:
     """A review record, or _ReviewsUnreadable when it cannot be read or is not a record."""
+    name = str(path.relative_to(_STATE)) if path.is_relative_to(_STATE) else path.name
     try:
+        if not team_result_guard.present(path, stat.S_IFREG):
+            raise _ReviewsUnreadable(f"{name}: gone while it was read", name)
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise _ReviewsUnreadable(f"{path.name}: {exc}") from exc
+        raise _ReviewsUnreadable(f"{name}: {exc}", name) from exc
     if not isinstance(record, dict):
-        raise _ReviewsUnreadable(f"{path.name}: not a review record")
+        raise _ReviewsUnreadable(f"{name}: not a review record", name)
     return record
 
 
@@ -1160,9 +1164,9 @@ def _settlement_record(directory: Path, review_id: str) -> "dict | None":
     it; None (fail closed) when the record that would decide cannot be read."""
     for path in (directory / "archive" / f"{review_id}.json", directory / f"{review_id}.json"):
         try:
+            if not team_result_guard.present(path, stat.S_IFREG):
+                continue
             record = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            continue
         except (OSError, ValueError):
             return None
         return record if isinstance(record, dict) else None
@@ -1387,7 +1391,11 @@ def _handle_review_decision(task: dict) -> bool:
         archived_reply = matched is not None and _archived_reply(matched[0])
     except (_ReviewsUnreadable, OSError) as exc:
         _log(f"withheld reviews: reply {task.get('id')} could not be checked ({exc})")
+        record = getattr(exc, "record", "")
         _queue_review_control_result(task, body=(
+            f"Your reply could not be checked: the review record `{record}` is not a readable "
+            f"review ({exc}). Nothing changed. Inspect or remove that file; then please reply again."
+            if record else
             "Your reply could not be checked against your pending reviews right now. Nothing "
             "changed; please reply again."))
         return True
