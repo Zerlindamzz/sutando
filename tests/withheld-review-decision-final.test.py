@@ -1927,6 +1927,101 @@ check(raised is None and handled is True
       and any("unwritable-answer not saved" in line for line in logs[logs_before:]),
       f"an unsaved answer is logged, never raised (raised={raised!r}, handled={handled})")
 
+# 25r. An archive whose existence cannot be read is unknown, never absent: a live publish_pending
+# copy beside a kept_private decision never posts. "emulated" reads unreadable as absent, as
+# Python 3.14's exists()/is_file()/is_dir() do, on any interpreter; "chmod" uses a real mode 000.
+@contextlib.contextmanager
+def unreadable_like_314(target):
+    target = pathlib.Path(target)
+    real_stat = os.stat
+    swallowed = {name: getattr(pathlib.Path, name) for name in ("exists", "is_file", "is_dir")}
+
+    def blocked_stat(p, *args, **kwargs):
+        if isinstance(p, (str, bytes, os.PathLike)):
+            candidate = pathlib.Path(os.fsdecode(p))
+            if candidate == target or target in candidate.parents:
+                raise PermissionError(13, "Permission denied", os.fsdecode(p))
+        return real_stat(p, *args, **kwargs)
+
+    def reads_absent(real):
+        def check(self, *args, **kwargs):
+            try:
+                return real(self, *args, **kwargs)
+            except OSError:
+                return False
+        return check
+
+    os.stat = blocked_stat
+    for name, real in swallowed.items():
+        setattr(pathlib.Path, name, reads_absent(real))
+    try:
+        yield
+    finally:
+        os.stat = real_stat
+        for name, real in swallowed.items():
+            setattr(pathlib.Path, name, real)
+
+
+@contextlib.contextmanager
+def chmod_000(target):
+    mode = target.stat().st_mode & 0o777
+    os.chmod(target, 0)
+    try:
+        yield
+    finally:
+        os.chmod(target, mode)
+
+
+variants = [("emulated", unreadable_like_314)]
+if os.geteuid() != 0:
+    variants.append(("chmod", chmod_000))
+for label, make_unreadable in variants:
+    path, rid, claimed, room_req = release(f"archive-unknown-{label}", lambda: {"event_id": "$leak"})
+    archived = path.parent / "archive" / path.name
+    archived.parent.mkdir(mode=0o700)
+    archived.write_text(json.dumps({**json.loads(path.read_text()), **YES}))
+    before, raised, mark = len(shared_posts()), [], len(calls)
+    with make_unreadable(archived.parent):
+        try:
+            emulation_active = not archived.exists()
+        except OSError:
+            emulation_active = label == "chmod"  # this Python raises instead of reading absent
+        for step in (bridge._retry_pending_publications,
+                     lambda: bridge._handle_review_decision(decision("No", rid, f"unknown-{label}")),
+                     bridge._retry_withheld_reviews):
+            bridge._req = room_req
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001
+                raised.append(exc)
+            finally:
+                bridge._req = fake_req
+    check(emulation_active and len(shared_posts()) == before
+          and json.loads(archived.read_text())["status"] == "kept_private",
+          f"{label}: an unreadable archive never lets a kept-private body post "
+          f"({len(shared_posts()) - before} POST(s), raised {raised!r})")
+    check(not raised, f"{label}: an unreadable archive is contained, never raised: {raised!r}")
+    card = json.loads(path.read_text()).get("dm_event_id")
+    edits = [p for _m, u, p in calls[mark:] if u == "/v1/room" and p.get("op") == "edit"
+             and p.get("event_id") == card]
+    check(not edits, f"{label}: the live copy never edits the owner's card while the archive is "
+                     f"unknown ({len(edits)} edit(s))")
+    with make_unreadable(archived.parent):
+        try:
+            bridge._publish_review(path, claimed)
+            gate = "passed"
+        except OSError:
+            gate = "raised"
+    check(gate == "raised" and len(shared_posts()) == before,
+          f"{label}: the publication gate raises on an unknown archive, before any POST ({gate})")
+    bridge._req = room_req
+    try:
+        published = bridge._publish_review(path, claimed)
+    finally:
+        bridge._req = fake_req
+    check(published is False and len(shared_posts()) == before,
+          f"{label}: once readable, the kept-private decision still wins: no POST")
+
 # 26. A reconcile that keeps failing stops re-editing the card after a bounded number of
 # tries, and says so once.
 bridge._STATE = root / "states" / "reconcile-gives-up"
