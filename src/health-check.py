@@ -9760,25 +9760,26 @@ def check_withheld_reviews_readable(workspace_dir: Optional[Path] = None) -> dic
     """A withheld-review record the bridge cannot read as a record makes every owner Yes/No
     in the DM answer "please reply again" until it is inspected or removed."""
     name = "withheld-reviews-readable"
-    base = Path(workspace_dir or WORKSPACE_DIR) / "state" / "withheld-team-results"
+    workspace = Path(workspace_dir or WORKSPACE_DIR)
+    try:
+        from policy.egress import result as guard  # noqa: PLC0415 - the bridge's own strict rule
+    except ImportError as exc:
+        return {"name": name, "status": "warn", "detail": f"cannot load the review guard ({exc})"}
+    base = workspace / "state" / guard.WITHHELD_RESULT_DIR
     bad: list[str] = []
     for folder in (base, base / "conflicts", base / "archive"):
         try:
-            names = sorted(n for n in os.listdir(folder) if n.startswith("wr_") and n.endswith(".json"))
-        except FileNotFoundError:
+            paths = guard.entries(folder, "wr_*.json")
+        except OSError:
+            bad.append(f"{folder.relative_to(workspace)}/ (a link, an odd entry or no access)")
             continue
-        except OSError as exc:
-            bad.append(f"{folder.relative_to(base.parent.parent)}/ ({exc.strerror or exc})")
-            continue
-        for entry in names:
-            path = folder / entry
+        for path in paths:
             try:
-                ok = (not path.is_symlink()
-                      and isinstance(json.loads(path.read_text(encoding="utf-8")), dict))
+                ok = isinstance(guard.read_json_strict(path), dict)
             except (OSError, ValueError):
                 ok = False
             if not ok:
-                bad.append(str(path.relative_to(base.parent.parent)))
+                bad.append(str(path.relative_to(workspace)))
     if bad:
         shown = ", ".join(bad[:4]) + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else "")
         return {"name": name, "status": "warn",

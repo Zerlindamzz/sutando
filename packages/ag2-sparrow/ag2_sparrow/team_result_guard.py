@@ -310,7 +310,7 @@ def _body_digest(body: str) -> str:
 def _holds(path: Path, field: str, body: str) -> bool:
     """The record at `path` is about exactly `body`; unreadable is not a match."""
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get(field) == body
+        return read_json_strict(path).get(field) == body
     except (OSError, ValueError, AttributeError):
         return False
 
@@ -356,20 +356,20 @@ def _issued_to(path: Path, field: str) -> "str | None":
     from before reservations existed is reserved first (seeding), and an unreadable
     one counts as issued to no body this rule can match."""
     try:
-        return _reservation(path).read_text(encoding="utf-8").strip()
+        return read_strict(_reservation(path)).strip()
     except FileNotFoundError:
         pass
     for existing in (_archived(path), path):           # a decision owns the id it decided
         if present(existing):
             _reserve(path, _record_digest(existing, field))
-            return _reservation(path).read_text(encoding="utf-8").strip()
+            return read_strict(_reservation(path)).strip()
     return None
 
 
 def _record_digest(path: Path, field: str) -> str:
     """The digest of the body a record holds; "unreadable" matches no body."""
     try:
-        body = json.loads(path.read_text(encoding="utf-8")).get(field)
+        body = read_json_strict(path).get(field)
     except (OSError, ValueError, AttributeError):
         return "unreadable"
     return _body_digest(body) if isinstance(body, str) else "unreadable"
@@ -390,7 +390,8 @@ def _ledger_lock(directory: Path):
     written, and its records archived: no transition interleaves with another."""
     issued = Path(directory) / "issued"
     issued.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(issued / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    present(issued, stat.S_IFDIR)  # raises on a linked or odd issued/
+    fd = os.open(issued / ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         lock_fd(fd)
         try:
@@ -414,17 +415,57 @@ def _owns_its_id(path: Path, field: str) -> bool:
 
 
 def present(path: Path, kind: "int | None" = None) -> bool:
-    """True when `path` is there as `kind`; False only when it is genuinely absent (see _absent).
+    """True when `path` is there as `kind`; False only when it is genuinely absent (see _walk).
     A symlink, a wrong kind or any other error is unknown and raises OSError, never reads absent."""
-    path = path if isinstance(path, Path) else Path(path)
-    try:
-        mode = os.lstat(path).st_mode
-    except FileNotFoundError:
-        _absent(path)
+    mode = _walk(path)
+    if mode is None:
         return False
-    if stat.S_ISLNK(mode) or (kind is not None and stat.S_IFMT(mode) != kind):
-        raise OSError(f"{path}: not a {'symlink-free path' if kind is None else 'path of its kind'}")
+    if kind is not None and stat.S_IFMT(mode) != kind:
+        raise OSError(f"{path}: not a path of its kind")
     return True
+
+
+def entries(directory: Path, pattern: str) -> list:
+    """The names under `directory` matching `pattern`; [] only when it is genuinely absent."""
+    if not present(directory, stat.S_IFDIR):
+        return []
+    directory = directory if isinstance(directory, Path) else Path(directory)
+    return sorted(directory / name for name in os.listdir(directory)
+                  if fnmatch.fnmatchcase(name, pattern))
+
+
+def read_strict(path: Path) -> str:
+    """The text of a record file, read only through the strict walk and never through a link;
+    a missing file raises FileNotFoundError, anything else unknown raises OSError."""
+    if not present(path, stat.S_IFREG):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def read_json_strict(path: Path):
+    return json.loads(read_strict(path))
+
+
+_NAMESPACES = (WITHHELD_RESULT_DIR, SUPPRESSED_RESULT_DIR)
+
+
+def _walk(path) -> "int | None":
+    # lstat each step from the record namespace (or the parent) down: a link or a non-directory
+    # on the way is unknown; None only when genuinely absent below a real, readable directory.
+    path = path if isinstance(path, Path) else Path(path)
+    root = next((a for a in (path, *path.parents) if a.name in _NAMESPACES), path.parent)
+    steps = [root, *reversed([a for a in path.parents if root in a.parents]), path]
+    for step in dict.fromkeys(steps):
+        try:
+            mode = os.lstat(step).st_mode
+        except FileNotFoundError:
+            _absent(step)
+            return None
+        if stat.S_ISLNK(mode) or (step != path and not stat.S_ISDIR(mode)):
+            raise OSError(f"{step}: {'a symlink' if stat.S_ISLNK(mode) else 'not a directory'}")
+    return mode
 
 
 def _absent(path: Path) -> None:
@@ -438,15 +479,6 @@ def _absent(path: Path) -> None:
             raise OSError(f"{path}: {ancestor} is not a readable directory")
         return
     raise OSError(f"{path}: no existing ancestor")
-
-
-def entries(directory: Path, pattern: str) -> list:
-    """The names under `directory` matching `pattern`; [] only when it is genuinely absent."""
-    if not present(directory, stat.S_IFDIR):
-        return []
-    directory = directory if isinstance(directory, Path) else Path(directory)
-    return sorted(directory / name for name in os.listdir(directory)
-                  if fnmatch.fnmatchcase(name, pattern))
 
 
 _VERSION_KEYS = ("status", "decision_claim_id", "generation")
@@ -474,7 +506,7 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
     try:
         if not present(path, stat.S_IFREG) or not _owns_its_id(path, field):
             return False
-        current = json.loads(path.read_text(encoding="utf-8"))
+        current = read_json_strict(path)
     except (OSError, ValueError):
         return False  # ownership that cannot be read is refused, never written
     if (not isinstance(current, dict) or record.get(field) != current.get(field)
@@ -552,9 +584,11 @@ def actionable_records(directory: Path, field: str = "withheld_body"):
     with _ledger_lock(directory):
         for path in entries(directory, "*.json"):
             try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                record = None                            # unreadable: never acts, frozen below
+                record = read_json_strict(path)
+            except OSError:
+                continue                                 # unknown (a link, unreadable): never acts
+            except ValueError:
+                record = None                            # malformed: never acts, frozen below
             if isinstance(record, dict) and _owns_its_id(path, field):
                 actionable.append((path, record))
                 continue
@@ -740,7 +774,7 @@ def _live_undecided_record(path: Path) -> "dict | None":
     if present(_archived(path)):
         return None
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
+        record = read_json_strict(path)
     except (OSError, ValueError):
         return None
     return record if isinstance(record, dict) else None
@@ -780,7 +814,7 @@ def archived_withheld_decision(path: Path) -> "dict | None":
         try:
             if not present(archived):
                 return None
-            record = json.loads(archived.read_text(encoding="utf-8"))
+            record = read_json_strict(archived)
         except (OSError, ValueError):
             return {}
     return record if isinstance(record, dict) else {}
@@ -810,7 +844,7 @@ def _proven_superseded(path: Path, field: str) -> bool:
     if not (present(path, stat.S_IFREG) and present(archived, stat.S_IFREG)):
         return False
     try:
-        decision = json.loads(archived.read_text(encoding="utf-8"))
+        decision = read_json_strict(archived)
     except (OSError, ValueError):
         return False
     digest = _record_digest(path, field)
@@ -876,7 +910,7 @@ def establish_decision(path: Path) -> bool:
     path = Path(path)
     with _ledger_lock(_record_directory(path)):
         try:
-            current = json.loads(path.read_text(encoding="utf-8"))
+            current = read_json_strict(path)
         except (OSError, ValueError):
             return False
         if not isinstance(current, dict):
@@ -904,7 +938,7 @@ def record_release_receipt(path: Path, claim_id, event_id: str) -> bool:
     path = Path(path)
     with _ledger_lock(_record_directory(path)):
         try:
-            current = json.loads(path.read_text(encoding="utf-8"))
+            current = read_json_strict(path)
         except (OSError, ValueError):
             return False
         if not isinstance(current, dict) or current.get("decision_claim_id") != claim_id:

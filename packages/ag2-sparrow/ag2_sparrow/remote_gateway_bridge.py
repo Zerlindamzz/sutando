@@ -733,6 +733,15 @@ def _durable_write(path: Path, text: str) -> bool:
     return False
 
 
+def _read_review_json(path: Path) -> "dict | None":
+    """A review record read only through the guard's strict walk; None when it cannot be."""
+    try:
+        record = team_result_guard.read_json_strict(path)
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
 def _read_private_json(path: Path) -> "dict | None":
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -831,7 +840,7 @@ def _review_buttons(review_id: str) -> dict:
 
 
 def _route_withheld_review(path: Path) -> bool:
-    record = _read_private_json(path)
+    record = _read_review_json(path)
     if not record:
         return False
     if record.get("status") != "pending_dm":
@@ -863,7 +872,7 @@ def _route_withheld_review(path: Path) -> bool:
     if team_result_guard.update_record(path, record, expect=version):
         return True
     # Another writer moved the record on while the DM was in flight; its state stands.
-    current = _read_private_json(path) or {}
+    current = _read_review_json(path) or {}
     _log(f"withheld review {path.stem}: routed copy is stale; keeping {current.get('status')}")
     return current.get("status") not in (None, "pending_dm")
 
@@ -875,9 +884,10 @@ _REVIEW_DECISION_RE = re.compile(
 class _ReviewsUnreadable(Exception):
     """The reviews could not be inspected, which is not the same as no review matching."""
 
-    def __init__(self, reason, record: str = ""):
-        super().__init__(reason)
-        self.record = record  # the review file to inspect, relative to the state directory
+    def __init__(self, detail, record: str = "", reason: str = ""):
+        super().__init__(detail)
+        self.record = record  # the review file to inspect, relative to the workspace
+        self.reason = reason  # plain words for the owner; never a host path
 
 
 def _pending_review_records(strict: bool = False) -> list[tuple[Path, dict]]:
@@ -907,7 +917,7 @@ def _pending_review_records(strict: bool = False) -> list[tuple[Path, dict]]:
         if not team_result_guard.decision_is_durable(record):
             # The durability barrier: a decision acts only once it is durably on disk.
             if team_result_guard.establish_decision(path):
-                record = _read_private_json(path) or record
+                record = _read_review_json(path) or record
         listed.append((path, record))
     return listed
 
@@ -943,23 +953,30 @@ def _review_paths(directory: Path, strict: bool) -> list[Path]:
 
 def _load_review(path: Path) -> dict:
     """A review record, or _ReviewsUnreadable when it cannot be read or is not a record."""
-    name = str(path.relative_to(_STATE)) if path.is_relative_to(_STATE) else path.name
+    workspace = _STATE.parent
+    name = str(path.relative_to(workspace)) if path.is_relative_to(workspace) else path.name
     try:
-        if not team_result_guard.present(path, stat.S_IFREG):
-            raise _ReviewsUnreadable(f"{name}: gone while it was read", name)
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise _ReviewsUnreadable(f"{name}: {exc}", name) from exc
+        record = team_result_guard.read_json_strict(path)
+    except OSError as exc:
+        raise _ReviewsUnreadable(f"{name}: {exc}", name,
+                                 "it cannot be read safely: a link, an odd entry or no access") from exc
+    except ValueError as exc:
+        raise _ReviewsUnreadable(f"{name}: {exc}", name, "it is not valid JSON") from exc
     if not isinstance(record, dict):
-        raise _ReviewsUnreadable(f"{name}: not a review record", name)
+        raise _ReviewsUnreadable(f"{name}: not a review record", name, "it is not a JSON object")
     return record
 
 
 def _check_reviews_readable(directory: Path) -> None:
-    # Archived records are loaded the same way where a reply is matched against them.
-    for folder in (directory, directory / "conflicts"):
-        for path in _review_paths(folder, strict=True):
-            _load_review(path)
+    # Under the ledger lock, so no archive or freeze moves a file mid-scan; archived records
+    # are loaded the same way where a reply is matched against them.
+    if not team_result_guard.present(directory, stat.S_IFDIR):
+        return
+    with team_result_guard.withheld_decision_lock(directory):  # the lock also refuses an odd issued/
+        team_result_guard.entries(directory / "claims", "*")       # raises on an odd claims/
+        for folder in (directory, directory / "conflicts"):
+            for path in _review_paths(folder, strict=True):
+                _load_review(path)
 
 
 def _match_review_decision(task: dict) -> "tuple[Path, dict, str] | None":
@@ -1022,7 +1039,7 @@ _REFUSED_REVIEW_PUBLICATIONS: set = set()
 
 
 def _stale_review_write(path: Path, step: str) -> None:
-    current = _read_private_json(path) or {}
+    current = _read_review_json(path) or {}
     _log(f"withheld review {path.stem}: {step} not recorded, the record changed meanwhile "
          f"(now {current.get('status')}); the next beat retries from it")
 
@@ -1164,9 +1181,9 @@ def _settlement_record(directory: Path, review_id: str) -> "dict | None":
     it; None (fail closed) when the record that would decide cannot be read."""
     for path in (directory / "archive" / f"{review_id}.json", directory / f"{review_id}.json"):
         try:
-            if not team_result_guard.present(path, stat.S_IFREG):
-                continue
-            record = json.loads(path.read_text(encoding="utf-8"))
+            record = team_result_guard.read_json_strict(path)
+        except FileNotFoundError:
+            continue
         except (OSError, ValueError):
             return None
         return record if isinstance(record, dict) else None
@@ -1180,7 +1197,7 @@ def _requeue_command(root, item_id: str) -> str:
 def _reread_record(path: Path) -> dict:
     """The live record, read again while it exists but does not read; {} once it is gone."""
     for _attempt in range(5):
-        current = _read_private_json(path)
+        current = _read_review_json(path)
         if current is not None or not team_result_guard.present(path):
             return current or {}
     return {}
@@ -1343,7 +1360,7 @@ def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | Non
 
 
 def _explain_unclaimed(task: dict, path: Path) -> None:
-    current = _read_private_json(path) or {}
+    current = _read_review_json(path) or {}
     if team_result_guard.decision_lost(path):
         _log(f"withheld review {path.stem}: an earlier decision was lost; reply "
              f"{task.get('id')} not applied, left for the owner")
@@ -1394,7 +1411,8 @@ def _handle_review_decision(task: dict) -> bool:
         record = getattr(exc, "record", "")
         _queue_review_control_result(task, body=(
             f"Your reply could not be checked: the review record `{record}` is not a readable "
-            f"review ({exc}). Nothing changed. Inspect or remove that file; then please reply again."
+            f"review ({exc.reason}). Nothing changed. Inspect or remove that file; then please "
+            "reply again."
             if record else
             "Your reply could not be checked against your pending reviews right now. Nothing "
             "changed; please reply again."))

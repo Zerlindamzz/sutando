@@ -1213,7 +1213,7 @@ check(bridge._withheld_outbox().provider.reconcile(None) is None,
 # 24a. A confirmed send whose record write is refused (a card resolver committed meanwhile)
 # and whose first reread is unreadable reads again and commits; nothing is re-sent.
 path, rid, claimed, room_req = release("reread", lambda: {"event_id": "$reread"})
-real_read, reads_left = bridge._read_private_json, [1]
+real_read, reads_left = bridge._read_review_json, [1]
 
 
 def unreadable_once(candidate, _path=path):
@@ -1227,7 +1227,7 @@ def confirm_then_bump(method, url, payload=None, timeout=35, _path=path, _room_r
     answer = _room_req(method, url, payload, timeout)
     if url == "/v1/room" and (payload or {}).get("room_id") == SHARED:
         bridge._resolve_review_card(_path, json.loads(_path.read_text()))
-        bridge._read_private_json = unreadable_once
+        bridge._read_review_json = unreadable_once
     return answer
 
 
@@ -1236,7 +1236,7 @@ bridge._req = confirm_then_bump
 try:
     committed = bridge._publish_review(path, claimed)
 finally:
-    bridge._req, bridge._read_private_json = fake_req, real_read
+    bridge._req, bridge._read_review_json = fake_req, real_read
 run_publish(path, claimed, room_req)
 _live, record = final_record(path)
 check(committed is True and reads_left == [0] and len(shared_posts()) - before == 1
@@ -1966,8 +1966,15 @@ def unreadable_like_314(target, stat=True, listing=False):
             return real[name](p, *args, **kwargs)
         return call
 
+    def blocked(candidate):
+        candidate = pathlib.Path(candidate)
+        return candidate == target or target in candidate.parents
+
     def reads_absent(real):
+        # Decided here, not via os.stat: Python 3.9's pathlib bound its stat before any patch.
         def check(self, *args, **kwargs):
+            if stat and blocked(self):
+                return False
             try:
                 return real(self, *args, **kwargs)
             except OSError:
@@ -2102,11 +2109,11 @@ with unreadable_like_314(archive_dir):
         site["handle-contains"] = False
     finally:
         bridge._match_review_decision = real_match
-real_read = bridge._read_private_json
-bridge._read_private_json = lambda _path: None
+real_read = bridge._read_review_json
+bridge._read_review_json = lambda _path: None
 with unreadable_like_314(path):
     site["reread"] = raises_unknown(lambda: bridge._reread_record(path))
-bridge._read_private_json = real_read
+bridge._read_review_json = real_read
 with unreadable_like_314(path.parent, stat=False, listing=True):
     site["actionable-listing"] = raises_unknown(lambda: guard.actionable_records(path.parent))
 
@@ -2174,13 +2181,22 @@ def break_namespace(kind, path):
     elif kind == "record-is-directory":
         path.unlink()
         path.mkdir()
+    elif kind in ("claims-linked", "issued-linked"):
+        folder = directory / kind.split("-")[0]
+        folder.rename(directory / f"{folder.name}-real")
+        folder.symlink_to(f"{folder.name}-real")
+    elif kind == "record-linked":
+        backing = path.with_name("backing.json")
+        path.rename(backing)
+        path.symlink_to(backing.name)
     elif kind == "issued-is-file":
         shutil.rmtree(directory / "issued")
         (directory / "issued").write_text("not a directory")
 
 
 for kind in ("archive-is-file", "archive-record-dangling", "archive-dir-dangling",
-             "record-is-directory", "issued-is-file"):
+             "record-is-directory", "issued-is-file", "claims-linked", "issued-linked",
+             "record-linked"):
     path, rid, claimed, room_req = release(f"ns-{kind}", lambda: {"event_id": "$ns-leak"})
     break_namespace(kind, path)
     before, raised = len(shared_posts()), []
@@ -2195,11 +2211,12 @@ for kind in ("archive-is-file", "archive-record-dangling", "archive-dir-dangling
         finally:
             bridge._req = fake_req
     status = json.loads(path.read_text()).get("status") if path.is_file() else None
+    leaked_host_path = str(root) in control_body(f"ns-{kind}")
     archived_ok = not (path.parent / "archive").is_dir() or not any(
         json.loads(p.read_text()).get("status") == "published"
         for p in (path.parent / "archive").glob("*.json") if p.is_file())
     check(len(shared_posts()) == before and status != "published" and archived_ok
-          and "reply again" in control_body(f"ns-{kind}"),
+          and "reply again" in control_body(f"ns-{kind}") and not leaked_host_path,
           f"{kind}: nothing posts, nothing is marked published, the reply is answered "
           f"({len(shared_posts()) - before} POST(s), status {status}, gate raised {raised})")
 
@@ -2212,6 +2229,35 @@ handled = bridge._handle_review_decision(decision("No", rid, "ns-conflicts-is-fi
 check(handled is True and "please reply again" in control_body("ns-conflicts-is-file")
       and json.loads(path.read_text())["status"] == "awaiting_owner" and len(shared_posts()) == before,
       f"conflicts/ as a file: the reply is answered and nothing changes ({handled})")
+
+# The reply's readability scan reads each record under the ledger lock, so no move races it.
+bridge._STATE = root / "scan-under-lock"
+path, rid = new_review("task-scan-under-lock")
+held, under_lock = [], []
+real_lock, real_load = guard.withheld_decision_lock, bridge._load_review
+
+
+@contextlib.contextmanager
+def recording_lock(directory):
+    with real_lock(directory):
+        held.append(True)
+        try:
+            yield
+        finally:
+            held.pop()
+
+
+def recording_load(record_path):
+    under_lock.append(bool(held))
+    return real_load(record_path)
+
+
+guard.withheld_decision_lock, bridge._load_review = recording_lock, recording_load
+try:
+    bridge._handle_review_decision(decision("Yes", rid, "scan-under-lock"))
+finally:
+    guard.withheld_decision_lock, bridge._load_review = real_lock, real_load
+check(under_lock and all(under_lock), f"the readability scan reads under the ledger lock: {under_lock}")
 
 # 25v. The absence rule itself: only a genuinely missing entry below a real, readable directory
 # is absent; a symlink, a wrong kind, a non-directory parent or a dangling link raises.

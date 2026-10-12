@@ -271,6 +271,32 @@ class WithheldReviewsReadable(unittest.TestCase):
         self.assertEqual(r["status"], "warn")
         self.assertIn("archive/wr_0000000000000003.json", r["detail"])
 
+    def test_a_linked_or_odd_review_folder_is_named(self):
+        real = self.ws / "elsewhere"
+        real.mkdir()
+        (real / "wr_0000000000000004.json").write_text(json.dumps({"status": "awaiting_owner"}))
+        (self.base / "conflicts").rmdir()
+        for label, make in (("linked", lambda f: f.symlink_to(real)),
+                            ("dangling", lambda f: f.symlink_to(self.ws / "missing")),
+                            ("a file", lambda f: f.write_text("x"))):
+            for folder in ("conflicts", "archive"):
+                with self.subTest(folder=folder, kind=label):
+                    target = self.base / folder
+                    make(target)
+                    try:
+                        r = self.hc.check_withheld_reviews_readable(self.ws)
+                    finally:
+                        target.unlink()
+                    self.assertEqual(r["status"], "warn")
+                    self.assertIn(f"withheld-team-results/{folder}/", r["detail"])
+
+    def test_it_agrees_with_the_guard(self):
+        source = (REPO / "src" / "health-check.py").read_text()
+        body = source[source.index("def check_withheld_reviews_readable"):]
+        body = body[:body.index("\ndef ")]
+        self.assertTrue("guard.entries(" in body and "guard.read_json_strict(" in body,
+                        "the health check must use the guard's own strict helpers")
+
     def test_the_check_is_registered(self):
         source = (REPO / "src" / "health-check.py").read_text()
         self.assertTrue("checks.append(check_withheld_reviews_readable())" in source,
