@@ -469,13 +469,14 @@ def _walk(path) -> "int | None":
 
 
 def _absent(path: Path) -> None:
-    # Absent only below a real, readable directory, every missing step missing for real.
+    # Missing is absent only below a readable directory. The walk already refused links inside the
+    # namespace; above it (a linked workspace or state root) a link to a directory is followed.
     for ancestor in path.parents:
         try:
-            mode = os.lstat(ancestor).st_mode
+            os.stat(ancestor)
         except FileNotFoundError:
             continue
-        if not stat.S_ISDIR(mode) or not os.access(ancestor, os.R_OK | os.X_OK):
+        if not os.access(ancestor, os.R_OK | os.X_OK):
             raise OSError(f"{path}: {ancestor} is not a readable directory")
         return
     raise OSError(f"{path}: no existing ancestor")

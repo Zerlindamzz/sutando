@@ -2259,6 +2259,25 @@ finally:
     guard.withheld_decision_lock, bridge._load_review = real_lock, real_load
 check(under_lock and all(under_lock), f"the readability scan reads under the ledger lock: {under_lock}")
 
+# A linked state root with no review namespace at all: a plain owner Yes/No is ordinary chat.
+# The namespace itself as a link stays unknown: the reply is answered, never ordinary work.
+real_state = root / "real-state"
+real_state.mkdir()
+linked_state = root / "linked-state"
+linked_state.symlink_to(real_state.name)
+bridge._STATE = linked_state
+plain = bridge._handle_review_decision(decision("Yes", "", "linked-root-plain") | {"task": "Yes"})
+check(plain is False and not control_body("linked-root-plain"),
+      f"a linked state root with no reviews leaves a plain Yes as ordinary chat ({plain})")
+bridge._STATE = root / "linked-namespace"
+path, rid = new_review("task-linked-namespace")
+moved = path.parent.with_name("withheld-team-results-real")
+path.parent.rename(moved)
+moved.with_name(guard.WITHHELD_RESULT_DIR).symlink_to(moved.name)
+answered = bridge._handle_review_decision(decision("Yes", "", "linked-namespace") | {"task": "Yes"})
+check(answered is True and "please reply again" in control_body("linked-namespace"),
+      f"a linked review namespace stays unknown: the plain reply is answered ({answered})")
+
 # 25v. The absence rule itself: only a genuinely missing entry below a real, readable directory
 # is absent; a symlink, a wrong kind, a non-directory parent or a dangling link raises.
 scratch = root / "absence"
@@ -2282,8 +2301,8 @@ rule = {
     "below-a-file": raises_unknown(lambda: guard.present(scratch / "file" / "x.json")),
     "below-dangling-dir": raises_unknown(lambda: guard.present(scratch / "dangling-dir" / "x.json")),
     "below-linked-dir": raises_unknown(lambda: guard.present(scratch / "link-dir" / "x.json")),
-    "namespace-below-linked-dir": raises_unknown(
-        lambda: guard.present(scratch / "link-dir" / guard.WITHHELD_RESULT_DIR / "x.json")),
+    "namespace-absent-below-linked-root": guard.present(
+        scratch / "link-dir" / guard.WITHHELD_RESULT_DIR / "x.json") is False,
     "read-below-linked-dir": raises_unknown(lambda: guard.read_strict(scratch / "link-dir" / "inner")),
     "entries-missing": guard.entries(scratch / "missing", "*") == [],
     "entries-file": raises_unknown(lambda: guard.entries(scratch / "file", "*")),
