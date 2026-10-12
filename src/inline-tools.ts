@@ -832,6 +832,24 @@ export function voiceTaskCounts(rows: VoiceTaskRow[]): { pending: number; workin
 	return { pending: working + doneNotHeard, working, doneNotHeard };
 }
 
+/**
+ * The relay agent's table as the user can see it live: `state/voice-task-status.json`, written by the
+ * voice agent whenever it changes and served by the web client at /voice-tasks. Same rows, same counts
+ * as get_task_status, so there is one number.
+ */
+export function voiceTaskStatusSnapshot(rows: VoiceTaskRow[], now = Date.now()): {
+	at: number; pending: number; working: number; doneNotHeard: number;
+	tasks: Array<{ id: string; text: string; submittedAt: number; state: string; delivery: string | null; heard: boolean; retired: boolean; pending: boolean }>;
+} {
+	const c = voiceTaskCounts(rows);
+	const tasks = [...rows].sort((a, b) => b.submittedAt - a.submittedAt).map((r) => {
+		const heard = heardByUser(r);
+		const live = r.state !== 'cancelled' && !r.retired;
+		return { id: r.id, text: r.text, submittedAt: r.submittedAt, state: r.state, delivery: r.delivery ?? null, heard, retired: !!r.retired, pending: live && !heard };
+	});
+	return { at: now, ...c, tasks };
+}
+
 export function describeVoiceTasks(rows: VoiceTaskRow[]): string {
 	if (rows.length === 0) return 'The user has asked for no tasks by voice in the last few hours.';
 	const group = (label: string, pick: (r: VoiceTaskRow) => boolean) => {

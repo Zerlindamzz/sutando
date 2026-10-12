@@ -510,6 +510,23 @@ describe('every status answer comes from the one table', () => {
 		assert.ok(tool.includes('voiceTaskCounts(rows)') && tool.includes('pendingTasks: counts.pending') && !tool.includes('openTasks'), 'the tool reports the table\'s count');
 	});
 
+	it('the live status snapshot carries every row, newest first, with the same pending count as the tool', async () => {
+		const { voiceTaskStatusSnapshot, voiceTaskCounts } = await import('../src/inline-tools.js');
+		const row = (text: string, submittedAt: number, state: string, delivery?: string, retired?: boolean) => ({ id: text, text, submittedAt, state, delivery, retired }) as never;
+		const rows = [row('PR 5302', 1, 'done', 'spoken'), row('PR 5167', 2, 'done'), row('PR 5329', 3, 'started'), row('cleared', 4, 'done', undefined, true), row('dm one', 5, 'done', 'dm')];
+		const snap = voiceTaskStatusSnapshot(rows, 99);
+		assert.equal(snap.at, 99);
+		assert.deepEqual({ pending: snap.pending, working: snap.working, doneNotHeard: snap.doneNotHeard }, voiceTaskCounts(rows));
+		assert.deepEqual(snap.tasks.map((t) => t.id), ['dm one', 'cleared', 'PR 5329', 'PR 5167', 'PR 5302'], 'newest first');
+		assert.deepEqual(snap.tasks.map((t) => t.pending), [true, false, true, true, false]);
+		assert.deepEqual(snap.tasks.map((t) => t.heard), [false, false, false, false, true]);
+		assert.equal(snap.tasks[1].retired, true);
+		assert.equal(snap.tasks[0].delivery, 'dm');
+		// The voice agent writes it and the web client serves it: one file, one number.
+		assert.ok(src('voice-agent.ts').includes("statusPath('voice-task-status.json', WORKSPACE_DIR)"));
+		assert.ok(src('web-client.ts').includes("url.pathname === '/voice-tasks'") && src('web-client.ts').includes("'voice-task-status.json'"));
+	});
+
 	it('describeVoiceTasks groups the user\'s tasks by where each stands and whether the result was heard', async () => {
 		const { describeVoiceTasks } = await import('../src/inline-tools.js');
 		const row = (text: string, state: string, delivery?: string) => ({ id: text, text, submittedAt: 1, state, delivery }) as never;
