@@ -129,7 +129,7 @@ describe('relay agent subagent: the work call returns its task\'s result', () =>
 });
 
 describe('relay agent: a text model checks a request before it is submitted', () => {
-	function agent(check: (input: { task: string; recentConversation: string }) => Promise<{ action: 'submit' } | { action: 'ask'; question: string }>) {
+	function agent(check: (input: { task: string; recentConversation: string }) => Promise<{ action: 'submit' } | { action: 'ask'; question: string } | { action: 'duplicate'; of: string }>) {
 		const store = createVoiceTaskStore();
 		const submitted: string[] = [];
 		const logs: string[] = [];
@@ -151,7 +151,7 @@ describe('relay agent: a text model checks a request before it is submitted', ()
 		assert.deepEqual(submitted, [], 'nothing submitted');
 		assert.match(out, /Nothing was submitted/);
 		assert.match(out, /Ask the user now, in their language, exactly: "你说的是哪个 PR？"/);
-		assert.deepEqual(seen, [{ task: '查一下PR的状态', recentConversation: 'user: 帮我查一下那个 PR 的状态' }], 'the check reads the request and the recent words');
+		assert.deepEqual(seen, [{ task: '查一下PR的状态', recentConversation: 'user: 帮我查一下那个 PR 的状态', openTasks: [] }], 'the check reads the request, the recent words and the open tasks');
 		assert.ok(logs.some((l) => l.includes('not submitted, asking the user: 你说的是哪个 PR？')));
 	});
 
@@ -176,6 +176,154 @@ describe('relay agent: a text model checks a request before it is submitted', ()
 		assert.deepEqual(parseWorkCheck('{"action":"submit"}'), { action: 'submit' });
 		assert.deepEqual(parseWorkCheck('{"action":"ask"}'), { action: 'submit' }, 'an ask with no question is not an ask');
 		assert.deepEqual(parseWorkCheck('sure, go ahead'), { action: 'submit' });
+	});
+});
+
+describe('relay agent: the same request is not sent twice', () => {
+	it('a work call the check finds already open waits for that task\'s result instead of submitting', async () => {
+		// 2026-10-12 22:10: "333PR53" and then "PR5333 Sultando Repo" became two tasks for PR 5333.
+		const store = createVoiceTaskStore();
+		store.add('task-open', '帮我查一下 PR 5333 改了什么');
+		const submitted: string[] = [];
+		const seen: unknown[] = [];
+		const relay = new RelayAgent({
+			store,
+			check: async (input) => { seen.push(input.openTasks); return { action: 'duplicate', of: 'task-open' }; },
+			submit: async (args) => { submitted.push(String(args.task)); return { status: 'pending', taskId: 'task-x', queuedAhead: 0, watcherOnline: true, message: 'm' }; },
+		});
+		const call = relay.invoke('w', { task: '查一下苏坦诺仓库 PR 5333 修改的具体内容' });
+		await tick(5);
+		assert.deepEqual(submitted, [], 'nothing new submitted');
+		assert.deepEqual(seen, [[{ id: 'task-open', text: '帮我查一下 PR 5333 改了什么' }]], 'the check saw the open task');
+		assert.ok(relay.isWaiting('task-open'), 'this call now waits on the open task');
+		assert.equal(relay.offerResult({ taskId: 'task-open', text: 'PR 5333 adds a summary.' }), true);
+		assert.match(await call, /PR 5333 adds a summary/);
+	});
+
+	it('only an id that is really open counts as a duplicate', async () => {
+		const { parseWorkCheck, parseTurnVerdict } = await import('../src/work-request-check.js');
+		const open = [{ id: 'task-1', text: 'PR 1' }];
+		assert.deepEqual(parseWorkCheck('{"action":"duplicate","of":"task-1"}', open), { action: 'duplicate', of: 'task-1' });
+		assert.deepEqual(parseWorkCheck('{"action":"duplicate","of":"task-9"}', open), { action: 'submit' });
+		assert.deepEqual(parseTurnVerdict('{"action":"duplicate","of":"task-9"}', open), { action: 'none' });
+	});
+
+	it('answered, cancelled, retired or corrected tasks are not open', () => {
+		const store = createVoiceTaskStore();
+		for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) store.add(`task-${id}`, id);
+		store.set('task-b', 'spoken');
+		store.markCancelRequested('task-c');
+		store.markRetired('task-d');
+		store.setSupersededBy('task-e', 'task-a');
+		store.set('task-f', 'dm');
+		const relay = new RelayAgent({ store, submit: async () => ({}) });
+		assert.deepEqual(relay.openTasks().map((t) => t.id), ['task-a']);
+	});
+});
+
+describe('relay agent: every finished user turn is checked, whatever tool the voice model chose', () => {
+	function agent(classify: (input: { utterance: string; openTasks?: unknown[] }) => Promise<unknown>) {
+		const store = createVoiceTaskStore();
+		const submitted: string[] = [];
+		const notices: string[] = [];
+		const logs: string[] = [];
+		let n = 0;
+		const relay = new RelayAgent({
+			store,
+			classify: classify as never,
+			recentConversation: () => 'user: 帮我查一下 5428 改了什么',
+			notice: (t) => notices.push(t),
+			log: (m) => logs.push(m),
+			submit: async (args) => { submitted.push(String(args.task)); const id = `task-t${++n}`; store.add(id, String(args.task)); return { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true, message: 'm' }; },
+		});
+		return { relay, store, submitted, notices, logs };
+	}
+
+	it('a request the voice model took for a task-list question is sent to the core', async () => {
+		// 2026-10-12 22:10: "帮我查一下 5334 的状态" went to get_task_status; no work call, the task was lost.
+		const { relay, store, submitted, notices } = agent(async () => ({ action: 'work', task: '查一下 PR 5334 的状态' }));
+		relay.onUserTurn('帮我查一下 5334 的状态。');
+		await tick(10);
+		assert.deepEqual(submitted, ['查一下 PR 5334 的状态']);
+		assert.equal(store.get('task-t1')?.text, '查一下 PR 5334 的状态', 'it is in the table');
+		assert.match(notices[0], /sent to the core for the user: "查一下 PR 5334 的状态".*Do not call work for it/);
+	});
+
+	it('a turn the voice model already sent with work is left to that call', async () => {
+		let asked = 0;
+		const { relay, submitted } = agent(async () => { asked++; return { action: 'work', task: 'x' }; });
+		void relay.invoke('w', { task: 'check PR 5428' });
+		await tick(1);
+		relay.onUserTurn('帮我查一下 5428 改了什么');
+		await tick(10);
+		assert.equal(asked, 0, 'not even checked');
+		assert.deepEqual(submitted, ['check PR 5428'], 'only the voice model\'s own call');
+	});
+
+	it('a work call that arrives while the turn is being checked wins; the turn check sends nothing', async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		const { relay, submitted } = agent(async () => { await gate; return { action: 'work', task: 'from the turn check' }; });
+		relay.onUserTurn('帮我查一下 5428');
+		await tick(1);
+		void relay.invoke('w', { task: 'from the voice model' });
+		release();
+		await tick(10);
+		assert.deepEqual(submitted, ['from the voice model']);
+	});
+
+	it('chit-chat and task-list questions send nothing; an ask is put to the user; a repeat is not sent', async () => {
+		const verdicts = [{ action: 'none' }, { action: 'ask', question: '你说的是哪个 PR？' }, { action: 'duplicate', of: 'task-t9' }];
+		const { relay, submitted, notices, logs } = agent(async () => verdicts.shift());
+		relay.onUserTurn('现在有几个 pending task？');
+		await tick(5);
+		relay.onUserTurn('帮我查一下那个 PR');
+		await tick(5);
+		relay.onUserTurn('再查一下 5333');
+		await tick(5);
+		assert.deepEqual(submitted, []);
+		assert.equal(notices.length, 1);
+		assert.match(notices[0], /Ask them now, in their language, exactly: "你说的是哪个 PR？"/);
+		assert.ok(logs.some((l) => l.includes('turn not sent, asking the user')));
+	});
+
+	it('the turns of one request are checked together once the user has finished speaking', async () => {
+		const seen: string[] = [];
+		const store = createVoiceTaskStore();
+		const speech = createSpeechGate({ quietMs: 60, maxHoldMs: 2_000 });
+		const relay = new RelayAgent({ store, speech, classify: async (i) => { seen.push(i.utterance); return { action: 'none' }; }, submit: async () => ({}) });
+		speech.onUserSpeechStarted();
+		relay.onUserTurn('帮我查一下');
+		relay.onUserTurn('5334 的状态');
+		await tick(20);
+		assert.deepEqual(seen, [], 'still speaking');
+		speech.onUserSpeechEnded();
+		await tick(120);
+		assert.deepEqual(seen, ['帮我查一下 5334 的状态']);
+	});
+
+	it('system lines and empty turns are not checked; with no classifier nothing happens', async () => {
+		let asked = 0;
+		const { relay } = agent(async () => { asked++; return { action: 'none' }; });
+		relay.onUserTurn('[System: something]');
+		relay.onUserTurn('   ');
+		await tick(5);
+		assert.equal(asked, 0);
+		new RelayAgent({ store: createVoiceTaskStore(), submit: async () => ({}) }).onUserTurn('帮我查一下 5334');
+	});
+
+	it('the model\'s reply is read as a decision; anything unclear is none', async () => {
+		const { parseTurnVerdict } = await import('../src/work-request-check.js');
+		assert.deepEqual(parseTurnVerdict('{"action":"work","task":"查一下 PR 5334"}'), { action: 'work', task: '查一下 PR 5334' });
+		assert.deepEqual(parseTurnVerdict('{"action":"work"}'), { action: 'none' }, 'work with no task is not work');
+		assert.deepEqual(parseTurnVerdict('{"action":"ask","question":"哪个？"}'), { action: 'ask', question: '哪个？' });
+		assert.deepEqual(parseTurnVerdict('ok'), { action: 'none' });
+	});
+
+	it('the voice agent hands every real user turn to the relay agent', () => {
+		const agentSrc = readFileSync(join(import.meta.dirname ?? '.', '..', 'src', 'voice-agent.ts'), 'utf-8');
+		assert.match(agentSrc, /relayAgent\.onUserTurn\(item\.content\)/);
+		assert.match(agentSrc, /classify: createGeminiTurnClassifier\(/);
 	});
 });
 

@@ -9,7 +9,7 @@
 
 import type { PersistentSubagentInstance, SubagentConfig } from 'bodhi-realtime-agent';
 import { frameTaskResult, framedSystem } from './inject-framing.js';
-import type { WorkRequestCheck } from './work-request-check.js';
+import type { OpenTask, TurnClassifier, WorkRequestCheck } from './work-request-check.js';
 
 /** How a voice task's result reached the user. `injected`: handed to the model, turn never confirmed. */
 export type Delivery = 'spoken' | 'injected' | 'dm';
@@ -436,8 +436,13 @@ export interface RelayAgentDeps {
 	check?: WorkRequestCheck;
 	/** The recent conversation the check reads. */
 	recentConversation?: () => string;
+	/** Looks at every finished user turn, whatever tool the voice model chose: is it a request for the core? */
+	classify?: TurnClassifier;
 	log?: (msg: string) => void;
 }
+
+/** A request sent this long ago and still unanswered is compared with new ones (a repeat is not sent twice). */
+export const OPEN_TASK_WINDOW_MS = 30 * 60_000;
 
 interface Waiter {
 	resolve: (text: string) => void;
@@ -463,9 +468,85 @@ export class RelayAgent implements PersistentSubagentInstance {
 	/** The call waiting for the user to finish speaking, not yet submitted. */
 	private holding: { args: Record<string, unknown>; joined: boolean } | null = null;
 
+	/** When the voice model last called `work`: a turn it covered itself is not sent again by the turn check. */
+	private lastWorkCallAt = 0;
+	/** User turns waiting for the turn check (several when the user went on speaking). */
+	private turns: Array<{ text: string; at: number }> = [];
+	private turnsRunning = false;
+	/** When the last turn the turn check took ended: a `work` call after it belongs to the next turn. */
+	private lastTurnAt = 0;
+
 	constructor(private readonly deps: RelayAgentDeps) {}
 
+	/** Tasks sent and not answered yet, newest last: what a new request is compared with. */
+	openTasks(now = Date.now()): OpenTask[] {
+		return this.deps.store.list()
+			.filter(([, r]) => !!r.text && !r.delivery && !r.cancelRequested && !r.retired && !r.supersededBy && !r.answeredBy && (r.submittedAt ?? r.at) > now - OPEN_TASK_WINDOW_MS)
+			.map(([id, r]) => ({ id, text: r.text as string }));
+	}
+
+	/**
+	 * The user finished a turn. The turn check decides whether it asks the core for something, whichever
+	 * tool the voice model chose (2026-10-12: "帮我查一下 5334 的状态" went to get_task_status and was lost).
+	 * A turn the voice model already sent with `work` is left to that call.
+	 */
+	onUserTurn(text: string, at = Date.now()): void {
+		const t = text.trim();
+		if (!this.deps.classify || !t || t.startsWith('[System:')) return;
+		this.turns.push({ text: t, at });
+		if (!this.turnsRunning) void this.drainTurns();
+	}
+
+	private async drainTurns(): Promise<void> {
+		this.turnsRunning = true;
+		try {
+			while (this.turns.length) {
+				// One request may span several turns: wait until the user is done, then take them together.
+				if (this.deps.speech) await this.deps.speech.waitTurnOver();
+				const taken = this.turns.splice(0);
+				const since = this.lastTurnAt;
+				this.lastTurnAt = taken[taken.length - 1].at;
+				if (this.lastWorkCallAt > since) continue; // the voice model sent it itself
+				const openTasks = this.openTasks();
+				const verdict = await this.deps.classify!({
+					utterance: taken.map((x) => x.text).join(' '),
+					recentConversation: this.deps.recentConversation?.() ?? '',
+					openTasks,
+				}).catch(() => ({ action: 'none' as const }));
+				if (this.lastWorkCallAt > since) continue; // the voice model's own call came in while the check ran
+				await this.actOnTurn(verdict);
+			}
+		} catch (err) {
+			this.deps.log?.(`[RelayAgent] turn check failed: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			this.turnsRunning = false;
+		}
+	}
+
+	private async actOnTurn(verdict: Awaited<ReturnType<TurnClassifier>>): Promise<void> {
+		if (verdict.action === 'none') return;
+		if (verdict.action === 'duplicate') {
+			this.deps.log?.(`[RelayAgent] the user asked again for ${verdict.of}; not sent twice`);
+			return;
+		}
+		if (verdict.action === 'ask') {
+			this.deps.log?.(`[RelayAgent] turn not sent, asking the user: ${verdict.question}`);
+			this.deps.notice?.(framedSystem(`What the user just asked cannot be sent to the core yet. Ask them now, in their language, exactly: "${verdict.question.replace(/"/g, "'")}"`));
+			return;
+		}
+		const submitted = await this.deps.submit({ task: verdict.task });
+		const taskId = submitted.taskId;
+		if (submitted.status !== 'pending' || typeof taskId !== 'string') {
+			this.deps.log?.(`[RelayAgent] turn check: the request was not taken (${String(submitted.status)})`);
+			return;
+		}
+		this.deps.log?.(`[RelayAgent] ${taskId}: sent by the turn check (the voice model had not called work): ${verdict.task}`);
+		// Its result comes like any other with no call waiting: handed to the model when it can speak.
+		this.deps.notice?.(framedSystem(`This request was sent to the core for the user: "${verdict.task.replace(/"/g, "'")}". If you have not already, tell the user in one short sentence that it is being looked into. Do not call work for it.`));
+	}
+
 	async invoke(_task: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+		this.lastWorkCallAt = Date.now();
 		if (this.deps.speech) {
 			// A call made while an earlier one still waits for the user's turn to end: the model has not
 			// answered in between, the user went on speaking, so the two are one request. The earlier
@@ -488,11 +569,21 @@ export class RelayAgent implements PersistentSubagentInstance {
 		}
 		if (this.deps.check) {
 			// A request with a blank in it (which PR? which file?) is not submitted: the user is asked.
-			const verdict = await this.deps.check({ task: String(args.task ?? ''), recentConversation: this.deps.recentConversation?.() ?? '' }, signal)
+			const verdict = await this.deps.check({ task: String(args.task ?? ''), recentConversation: this.deps.recentConversation?.() ?? '', openTasks: this.openTasks() }, signal)
 				.catch(() => ({ action: 'submit' as const }));
 			if (verdict.action === 'ask') {
 				this.deps.log?.(`[RelayAgent] not submitted, asking the user: ${verdict.question}`);
 				return framedSystem(`Nothing was submitted: the request does not say what it is about. Ask the user now, in their language, exactly: "${verdict.question.replace(/"/g, "'")}" Then, with their answer, call work again.`);
+			}
+			if (verdict.action === 'duplicate') {
+				// The same request is already with the core (2026-10-12: PR 5333 was sent twice). This call
+				// waits for that task's result instead, unless another call already does.
+				this.deps.log?.(`[RelayAgent] ${verdict.of}: asked again; not sent twice`);
+				if (this.waiting.has(verdict.of)) return framedSystem('This request was already sent to the core and its result will be told when it comes. Tell the user so in one short sentence.');
+				return new Promise<string>((resolve, reject) => {
+					this.waiting.set(verdict.of, { resolve, reject });
+					signal?.addEventListener('abort', () => { this.endCall(verdict.of, 'continuing'); }, { once: true });
+				});
 			}
 		}
 		const submitted = await this.deps.submit(args);

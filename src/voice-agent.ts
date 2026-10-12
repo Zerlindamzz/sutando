@@ -73,7 +73,7 @@ import { buildGreeting, buildInstructions, type VoiceConfigContext } from './voi
 import { wireDurableChannels, createSessionRecorder } from './live-agent-runtime.js';
 import { RelayAgent, relayAgentSubagentConfig, createSpeechGate } from './relay-agent.js';
 import { createVoiceTaskStatusWriter } from './voice-task-status-writer.js';
-import { createGeminiWorkCheck } from './work-request-check.js';
+import { createGeminiTurnClassifier, createGeminiWorkCheck } from './work-request-check.js';
 import {
 	classifyTransportClose,
 	fatalCloseForRecovery,
@@ -973,6 +973,8 @@ async function main() {
 		// A text model, not the voice model, decides whether a request is complete enough to submit.
 		check: createGeminiWorkCheck({ apiKey: () => GEMINI_VOICE_API_KEY, log: (m) => console.log(`${ts()} ${m}`) }),
 		recentConversation: () => getRecentConversation(8),
+		// Every finished user turn too, whatever tool the voice model chose: is it a request for the core?
+		classify: createGeminiTurnClassifier({ apiKey: () => GEMINI_VOICE_API_KEY, log: (m) => console.log(`${ts()} ${m}`) }),
 		notice: (text) => { sessionRef?.tryPublishSystemNotification(text); },
 		log: (msg) => console.log(`${ts()} ${msg}`),
 	});
@@ -1441,6 +1443,8 @@ async function main() {
 				// speech and shouldn't unlock end_session.
 				if (item.role === 'user' && item.content && !item.content.startsWith('[System:')) {
 					userTurnCount++;
+					// The relay agent looks at every request, not only the ones the voice model sent with work.
+					relayAgent.onUserTurn(item.content);
 				}
 			}
 		}
