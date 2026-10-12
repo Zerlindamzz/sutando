@@ -17,7 +17,7 @@ mkdirSync(join(workspace, 'logs'), { recursive: true });
 
 const {
 	workTool, setVoiceSessionOrigin, setVoiceTurnsProvider, voiceTaskOrigin,
-	forwardOfflineVoiceResult, logSessionBoundary,
+	forwardOfflineVoiceResult, logSessionBoundary, endVoiceClientSession,
 } = await import('../src/task-bridge.js');
 
 afterEach(() => {
@@ -133,6 +133,31 @@ describe('a voice task retains the context that invoked it', () => {
 		const { taskId } = await pending;
 		await assertOrigin(taskId, 'same-room');
 		assert.doesNotMatch(taskBody(taskId), /reconnected client|--- spoken/);
+	});
+
+	it('re-announcing the same origin is not a move: the late words stay with the task', { timeout: 5000 }, async () => {
+		const speech = pendingTranscript();
+		setVoiceSessionOrigin(origin('steady-room'));
+		setVoiceTurnsProvider(speech.provider);
+		const pending = delegate('work while the client re-announces its room');
+		await speech.read;
+		setVoiceSessionOrigin(origin('steady-room'));
+		speech.setInput('words for the steady room');
+		const { taskId } = await pending;
+		await assertOrigin(taskId, 'steady-room');
+		assert.match(taskBody(taskId), /user: words for the steady room/);
+	});
+
+	it('a client that leaves with no origin bound still closes the old transcript window', { timeout: 5000 }, async () => {
+		const speech = pendingTranscript();
+		setVoiceTurnsProvider(speech.provider);
+		const pending = delegate('work before an unbound client leaves');
+		await speech.read;
+		endVoiceClientSession();
+		speech.setInput('the next client speaks');
+		const { taskId } = await pending;
+		assert.match(taskBody(taskId), /^channel_id: local-voice$/m);
+		assert.doesNotMatch(taskBody(taskId), /next client speaks|--- spoken/);
 	});
 
 	it('a new provider without a room change cannot supply the preceding session transcript', { timeout: 5000 }, async () => {

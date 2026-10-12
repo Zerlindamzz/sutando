@@ -229,7 +229,16 @@ let _voiceContextRevision = 0;
 /** Bind (or, with null, release) the origin of the live voice session. A task carries the
  *  origin current when it was asked for; a malformed origin binds nothing. */
 export function setVoiceSessionOrigin(origin: VoiceSessionOrigin | null): void {
-	_voiceSessionOrigin = _usableOrigin(origin);
+	const next = _usableOrigin(origin);
+	// A re-announce of the same origin is not a move: an in-flight call keeps its words.
+	if (next?.channel !== _voiceSessionOrigin?.channel || next?.target !== _voiceSessionOrigin?.target) _voiceContextRevision++;
+	_voiceSessionOrigin = next;
+}
+
+/** The live client is gone: release its origin and close every open transcript window,
+ *  bound origin or not, since the next client reads through the same turns provider. */
+export function endVoiceClientSession(): void {
+	_voiceSessionOrigin = null;
 	_voiceContextRevision++;
 }
 
