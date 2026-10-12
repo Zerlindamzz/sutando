@@ -310,13 +310,14 @@ from .team_guardrail import ag2space_tier_lines, owner_mention_lines
 from . import team_result_guard
 from .outbox import DeliveryOutcome, record_delivered
 from .outbox import RetrySchedule, delivered_body_differs, read_item, source_digest
+from .outbox import list_items, requeue_item_with_epoch
 from .proactive_recovery import claim_owner_may_be_alive as _pid_alive
 from .outbox_adapter import classify_response
 from .send_failure_policy import MAX_TRANSIENT_ATTEMPTS, resolve_failed_send
 from .delivery_core import (DeliveryCore, DesignAClaimBackend, DrainStatus,
                             RetryPolicy)
 from .delivery_core import DeliveryOutcome as CoreDeliveryOutcome
-from .delivery_core.provider_ag2space import AG2SpaceRoomMessageProvider
+from .delivery_core.provider_ag2space import AG2SpaceRoomMessageProvider, room_response_refused
 from .delivery_core.provider_ag2space import (AG2SpaceResultProvider, RESULT_THREAD_ASK,
                                               RESULT_THREAD_FIELD)
 from .result_ready import (identity_of, read_ready_result, read_ready_result_with_identity,
@@ -1072,13 +1073,44 @@ def _commit_landed(path: Path, record: dict, current: dict) -> bool:
     return committed
 
 
-def _settle_landed_release(core: DeliveryCore, item_id: str, room: str) -> None:
-    """Close an outbox item whose release is proven by a recorded event id, through the
-    outbox's own claim, so it is never delivered again; a held or terminal item is left."""
+def _settle_landed_release(core: DeliveryCore, item_id: str, room: str) -> bool:
+    """Drive an outbox item whose release a recorded event id proves to DELIVERED, through
+    the outbox's own requeue, claim and complete; never sends. False while a claim holds it."""
+    root = core.backend.root
+    if (read_item(root, item_id) or {}).get("status") == "PARKED":
+        requeue_item_with_epoch(root, item_id, operator=core.worker,
+                                reason="release proven by a recorded event id")
     token = core.backend.claim(item_id, core.worker)
-    if token is not None:
-        core.backend.complete(token, CoreDeliveryOutcome.CONFIRMED,
-                              provider=type(core.provider).__name__, destination=room)
+    if token is None:
+        return (read_item(root, item_id) or {}).get("status") == "DELIVERED"
+    return core.backend.complete(token, CoreDeliveryOutcome.CONFIRMED,
+                                 provider=type(core.provider).__name__, destination=room)
+
+
+def _settle_landed_releases() -> None:
+    """Each beat: an outbox item not yet DELIVERED whose review (live or archived) holds the
+    receipt for its claim is driven to DELIVERED until it is, never sent again."""
+    core = _withheld_outbox()
+    directory = _STATE / team_result_guard.WITHHELD_RESULT_DIR
+    for item in list_items(core.backend.root):
+        item_id = str(item.get("item_id") or "")
+        review_id, _, claim = item_id.partition(".")
+        if item.get("status") == "DELIVERED" or not claim:
+            continue
+        record = (_read_private_json(directory / f"{review_id}.json")
+                  or _read_private_json(directory / "archive" / f"{review_id}.json") or {})
+        if (record.get("decision_claim_id") != claim
+                or not isinstance(record.get("release_event_id"), str) or not record["release_event_id"]):
+            continue
+        room = str((record.get("context") or {}).get("channel_id") or "")
+        try:
+            if not _settle_landed_release(core, item_id, room) and f"settle:{item_id}" not in \
+                    _REFUSED_REVIEW_PUBLICATIONS:
+                _REFUSED_REVIEW_PUBLICATIONS.add(f"settle:{item_id}")
+                _log(f"withheld review {review_id}: published; its outbox item is still claimed "
+                     "and is settled once that claim can be taken")
+        except Exception as exc:  # noqa: BLE001 — next beat retries
+            _log(f"withheld review {review_id}: outbox settlement deferred ({exc})")
 
 
 def _requeue_command(root, item_id: str) -> str:
@@ -1139,7 +1171,8 @@ def _edit_review_card(record: dict) -> "dict | None":
         "op": "edit", "room_id": room, "event_id": event_id,
         "body": _resolved_review_body(record),
     }, timeout=20)
-    if not isinstance(answer, dict) or not (answer.get("ok") or answer.get("event_id")):
+    if (not isinstance(answer, dict) or room_response_refused(answer)
+            or not (answer.get("ok") or answer.get("event_id"))):
         return None
     return answer
 
@@ -1237,29 +1270,36 @@ def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | Non
     # The first durable decision is final; a later or racing reply is closed and logged.
     try:
         claimed = team_result_guard.claim_withheld_decision(path, updates)
-    except Exception as exc:  # noqa: BLE001 — a failed claim is reported, never escapes the beat
-        _log(f"withheld review {path.stem}: claim failed ({exc})")
+        if claimed is None:
+            _explain_unclaimed(task, path)
+    except Exception as exc:  # noqa: BLE001 — a failed claim is answered, never escapes the beat
+        _log(f"withheld review {path.stem}: reply {task.get('id')} could not be processed ({exc})")
+        _queue_review_control_result(task, body=(
+            f"Your decision on review `{path.stem}` could not be processed right now. Nothing "
+            "changed; please reply again."))
         claimed = None
-    if claimed is None:
-        current = _read_private_json(path) or {}
-        if team_result_guard.decision_lost(path):
-            _log(f"withheld review {path.stem}: an earlier decision was lost; reply "
-                 f"{task.get('id')} not applied, left for the owner")
-            _queue_review_control_result(task, body=_lost_decision_notice(path, current))
-        elif current.get("status") not in (None, "awaiting_owner") \
-                and not team_result_guard.decision_is_durable(current):
-            _log(f"withheld review {path.stem}: decision recorded, it acts once it is durable; "
-                 f"reply {task.get('id')} not applied again")
-        elif current.get("status") == "awaiting_owner":
-            _log(f"withheld review {path.stem}: decision could not be saved; reply "
-                 f"{task.get('id')} not applied, the owner can answer again")
-            _queue_review_control_result(task, body=(
-                f"Your decision on review `{path.stem}` could not be saved. Nothing changed; "
-                "please reply again."))
-        else:
-            _log(f"withheld review {path.stem}: already decided; reply {task.get('id')} ignored")
     _queue_review_control_result(task)
     return claimed
+
+
+def _explain_unclaimed(task: dict, path: Path) -> None:
+    current = _read_private_json(path) or {}
+    if team_result_guard.decision_lost(path):
+        _log(f"withheld review {path.stem}: an earlier decision was lost; reply "
+             f"{task.get('id')} not applied, left for the owner")
+        _queue_review_control_result(task, body=_lost_decision_notice(path, current))
+    elif current.get("status") not in (None, "awaiting_owner") \
+            and not team_result_guard.decision_is_durable(current):
+        _log(f"withheld review {path.stem}: decision recorded, it acts once it is durable; "
+             f"reply {task.get('id')} not applied again")
+    elif current.get("status") == "awaiting_owner":
+        _log(f"withheld review {path.stem}: decision could not be saved; reply "
+             f"{task.get('id')} not applied, the owner can answer again")
+        _queue_review_control_result(task, body=(
+            f"Your decision on review `{path.stem}` could not be saved. Nothing changed; "
+            "please reply again."))
+    else:
+        _log(f"withheld review {path.stem}: already decided; reply {task.get('id')} ignored")
 
 
 def _lost_decision_notice(path: Path, record: dict) -> str:
@@ -1341,6 +1381,10 @@ def _retry_pending_publications() -> None:
                 _log(f"withheld review {record.get('review_id')} publish still pending")
         except Exception as exc:  # noqa: BLE001 — next poll retries
             _log(f"withheld review {record.get('review_id')} publish retry failed: {exc}")
+    try:
+        _settle_landed_releases()
+    except Exception as exc:  # noqa: BLE001 — next poll retries
+        _log(f"withheld release settlement deferred: {exc}")
 
 
 def _retry_review_card_resolutions() -> None:

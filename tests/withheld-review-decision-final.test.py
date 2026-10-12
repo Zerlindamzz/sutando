@@ -1252,12 +1252,12 @@ dead = subprocess.Popen([sys.executable, "-c", "pass"])
 dead.wait()
 
 
-def owner_died(path, rid, claimed):
+def owner_died(path, rid, claimed, age=3600):
     root_dir = bridge._withheld_outbox().backend.root
     claim_file = outbox_mod._claim_path(root_dir, f"{rid}.{claimed['decision_claim_id']}")
     data = json.loads(claim_file.read_text())
     claim_file.write_text(json.dumps({**data, "pid": dead.pid, "start_usec": None,
-                                      "claimed_at": data["claimed_at"] - 3600}))
+                                      "claimed_at": data["claimed_at"] - age}))
 
 
 for stage, expected_posts in (("before-claim", 1), ("before-post", 1), ("after-post", 2),
@@ -1508,7 +1508,7 @@ try:
     bridge._handle_review_decision(decision("No", rid, "undurable-no"))
     for _beat in range(3):
         bridge._retry_withheld_reviews()
-    stuck = json.loads(path.read_text())
+    _live, stuck = final_record(path)
 finally:
     guard._fsync_directory = real_sync
 check(stuck["status"] == "publish_pending" and stuck.get("decision_durable") is False
@@ -1536,9 +1536,10 @@ for label, sent in (("rollback-unsent", False), ("rollback-sent", True)):
           and f"rm -- {claims[0]}" in notice,
           f"{label}: the notice says what the outbox proves and how to unlock: {notice[-90:]}")
 
-# 25f. A crash after the receipt is written but before the outbox marks it delivered ends
-# published from the receipt, with no second POST, whether or not the claim can be reclaimed.
-for label, owner_dead in (("receipt-crash-reclaimed", True), ("receipt-crash-held", False)):
+# 25f. A crash between the receipt and DELIVERED ends published with one POST; the outbox
+# item is driven DELIVERED once its claim can be taken (at once, or after the reclaim window).
+for label, owner_state in (("receipt-crash-reclaimed", "dead"), ("receipt-crash-held", "alive"),
+                           ("receipt-crash-fresh-death", "dead-before-ttl")):
     path, rid, claimed, room_req = release(label, lambda: {"event_id": "$landed"})
     provider = bridge._withheld_outbox().provider
     real_record = provider._record_receipt
@@ -1557,15 +1558,23 @@ for label, owner_dead in (("receipt-crash-reclaimed", True), ("receipt-crash-hel
     finally:
         bridge._req = fake_req
         provider._record_receipt = real_record
-    if owner_dead:
-        owner_died(path, rid, claimed)
+    if owner_state != "alive":
+        owner_died(path, rid, claimed, age=3600 if owner_state == "dead" else 0)
     bridge._WITHHELD_OUTBOX = None
     run_publish(path, claimed, room_req)
+    bridge._retry_withheld_reviews()  # the card resolves and the review is archived
     _live, record = final_record(path)
+    first_status = outbox_item(path, rid, claimed).get("status")
     check(len(shared_posts()) - before == 1 and record["status"] == "published"
-          and record["published_event_id"] == "$landed"
-          and (outbox_item(path, rid, claimed).get("status") == "DELIVERED") == owner_dead,
-          f"{label}: published from the receipt, one POST ({record['status']})")
+          and record["published_event_id"] == "$landed" and not path.exists()
+          and (first_status == "DELIVERED") == (owner_state == "dead"),
+          f"{label}: published from the receipt and archived, one POST, outbox {first_status}")
+    if owner_state != "dead":
+        owner_died(path, rid, claimed)
+        bridge._retry_pending_publications()
+    check(outbox_item(path, rid, claimed).get("status") == "DELIVERED"
+          and len(shared_posts()) - before == 1,
+          f"{label}: once the claim can be taken the outbox item ends DELIVERED, no second POST")
 
 # 25g. A receipt whose sync failed after the POST landed still proves the landing: the
 # release is published from it, never sent again.
@@ -1587,8 +1596,10 @@ finally:
 run_publish(path, claimed, room_req)
 _live, record = final_record(path)
 check(len(shared_posts()) - before == 1 and record["status"] == "published"
-      and record["published_event_id"] == "$synced-late",
-      f"receipt sync failed after the POST: published from the receipt once ({record['status']})")
+      and record["published_event_id"] == "$synced-late"
+      and outbox_item(path, rid, claimed).get("status") == "DELIVERED",
+      f"receipt sync failed after the POST: published once, the parked item settled DELIVERED "
+      f"({record['status']}, {outbox_item(path, rid, claimed).get('status')})")
 
 # 25h. Claim failures fail safe: a non-OSError write failure frees the review; a rollback
 # that fails leaves a claim the owner is told how to remove; a raising claim is reported.
@@ -1651,8 +1662,76 @@ except Exception as exc:  # noqa: BLE001
     raised = exc
 finally:
     guard.claim_withheld_decision = real_claim
-check(raised is None and handled is True and any("claim failed (boom)" in line for line in logs),
-      f"a raising claim is reported, never escapes the beat: {raised!r}")
+check(raised is None and handled is True and any("could not be processed (boom)" in line for line in logs)
+      and "please reply again" in json.loads(bridge._control_result_path("claim-raises").read_text())["body"],
+      f"a raising claim is answered, never escapes the beat: {raised!r}")
+
+# 25j. A real shared-ledger-lock failure after the reply is matched is answered and contained;
+# once the lock works again the owner's next reply is applied.
+bridge._STATE = root / "lock-fails"
+path, rid = new_review("task-lock-fails")
+lock_file = path.parent / "issued" / ".lock"
+real_match = bridge._match_review_decision
+
+
+def match_then_lock_breaks(task):
+    matched = real_match(task)
+    os.chmod(lock_file, 0)
+    return matched
+
+
+bridge._match_review_decision = match_then_lock_breaks
+try:
+    raised = None
+    handled = bridge._handle_review_decision(decision("No", rid, "lock-fails-1"))
+except Exception as exc:  # noqa: BLE001
+    raised = exc
+finally:
+    bridge._match_review_decision = real_match
+    os.chmod(lock_file, 0o600)
+answer = json.loads(bridge._control_result_path("lock-fails-1").read_text())["body"]
+before = len(shared_posts())
+bridge._handle_review_decision(decision("No", rid, "lock-fails-2"))
+_live, record = final_record(path)
+check(raised is None and handled is True and "could not be processed" in answer
+      and record["status"] == "published" and len(shared_posts()) - before == 1,
+      f"a real lock failure is answered, then the next reply applies ({record['status']})")
+
+# 25k. A card edit refused with an event id is a refusal: the live copy is not retired.
+bridge._STATE = root / "states" / "card-refused"
+directory = bridge._STATE / "withheld-team-results"
+(directory / "archive").mkdir(parents=True)
+(directory / "archive" / "wr_0000000000000000.json").write_text(
+    json.dumps({**base_record, **YES, "dm_event_id": "$card-refused"}))
+live = directory / "wr_0000000000000000.json"
+live.write_text(json.dumps({**base_record, **NO, "dm_event_id": "$card-refused"}))
+
+
+def refused_edit(method, url, payload=None, timeout=35):
+    if url == "/v1/room" and (payload or {}).get("op") == "edit":
+        return {"ok": False, "error": "refused", "event_id": "$diagnostic"}
+    return fake_req(method, url, payload, timeout)
+
+
+bridge._req = refused_edit
+try:
+    bridge._retry_withheld_reviews()
+finally:
+    bridge._req = fake_req
+check(live.exists() and not (directory / "archive" / "superseded").exists(),
+      "a refused card edit carrying an event id does not retire the live copy")
+
+# 25l. The unlock command in a lost-decision notice is shell-quoted.
+bridge._STATE = root / "Application Support" / "unlock"
+path, rid = new_review("task-unlock-quoted")
+awaiting = path.read_bytes()
+guard.claim_withheld_decision(path, dict(NO))
+path.write_bytes(awaiting)
+bridge._handle_review_decision(decision("Yes", rid, "unlock-quoted"))
+notice = json.loads(bridge._control_result_path("unlock-quoted").read_text())["body"]
+claim_file = next((path.parent / "claims").glob(f"{path.stem}.*"))
+check(shlex.split(notice.split("remove its claim: ", 1)[1]) == ["rm", "--", str(claim_file)],
+      f"the unlock command round-trips through the shell: {notice[-120:]}")
 
 # 25i. The recovery command is shell-quoted, so a root under Application Support works.
 command = bridge._requeue_command(pathlib.Path("/Users/x/Library/Application Support/ws/results/"

@@ -71,6 +71,12 @@ class AG2SpaceResultProvider:
         return None
 
 
+def room_response_refused(resp) -> bool:
+    """An explicit refusal in a room-op response wins over any id the same response carries."""
+    return isinstance(resp, dict) and bool(resp.get("ok") is False or resp.get("error")
+                                           or resp.get("errcode"))
+
+
 class AG2SpaceRoomMessageProvider:
     """Sends one message to an AG2 Space room through the injected room sender. Only a Matrix
     event id proves delivery, and it is durably recorded before the send counts as delivered."""
@@ -99,9 +105,7 @@ class AG2SpaceRoomMessageProvider:
             raise ProviderPermanentRefused(f"gateway refused {item_id}: HTTP {e.code}") from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise ProviderIndeterminate(f"transport failure for {item_id}: {e}") from e
-        # An explicit refusal wins over any id the same response carries.
-        if isinstance(resp, dict) and (resp.get("ok") is False or resp.get("error")
-                                       or resp.get("errcode")):
+        if room_response_refused(resp):
             raise ProviderPermanentRefused(f"gateway declined {item_id}: {str(resp)[:200]}")
         receipt = classify_response(200, resp, id_keys=("event_id",))
         event_id = resp.get("event_id") if isinstance(resp, dict) else None
