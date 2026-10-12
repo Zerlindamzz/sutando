@@ -20,9 +20,11 @@ journaled, rather than refused.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -358,7 +360,7 @@ def _issued_to(path: Path, field: str) -> "str | None":
     except FileNotFoundError:
         pass
     for existing in (_archived(path), path):           # a decision owns the id it decided
-        if existing.exists():
+        if present(existing):
             _reserve(path, _record_digest(existing, field))
             return _reservation(path).read_text(encoding="utf-8").strip()
     return None
@@ -377,7 +379,7 @@ def _record_of(path: Path, digest: str, field: str) -> "Path | None":
     """The record of an id issued to `digest`, its decision first: only a record
     holding that very body, never another body's copy under the same id."""
     for existing in (_archived(path), path):
-        if existing.exists() and _record_digest(existing, field) == digest:
+        if present(existing) and _record_digest(existing, field) == digest:
             return existing
     return None
 
@@ -407,17 +409,27 @@ def _record_directory(path: Path) -> Path:
 def _owns_its_id(path: Path, field: str) -> bool:
     """A live record may act only while its id is reserved to the body it holds
     and no decision for that id is archived; an archived decision is immutable."""
-    return (path.parent.name != "archive" and not _present(_archived(path))
+    return (path.parent.name != "archive" and not present(_archived(path))
             and _issued_to(path, field) == _record_digest(path, field))
 
 
-def _present(path: Path) -> bool:
-    """exists() reads an unreadable directory as absent; here that raises instead."""
+def present(path: Path, kind: "int | None" = None) -> bool:
+    """Absent is False; unreadable raises OSError. exists(), is_file() and is_dir() read an
+    unreadable path as absent on some Pythons, which must never let a record act."""
     try:
-        path.stat()
-    except FileNotFoundError:
+        mode = os.stat(path).st_mode
+    except (FileNotFoundError, NotADirectoryError):
         return False
-    return True
+    return kind is None or stat.S_IFMT(mode) == kind
+
+
+def entries(directory: Path, pattern: str) -> list:
+    """The names under `directory` matching `pattern`; [] only when it is absent, unlike glob()."""
+    try:
+        names = os.listdir(directory)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    return sorted(Path(directory) / name for name in names if fnmatch.fnmatchcase(name, pattern))
 
 
 _VERSION_KEYS = ("status", "decision_claim_id", "generation")
@@ -442,12 +454,12 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
                         landed: "list | None" = None) -> bool:
     """The one writer of a live record; the caller holds the ledger lock. Refuses a
     record that does not own its id, would change its body, or changed since read."""
-    if not path.is_file() or not _owns_its_id(path, field):
-        return False
     try:
+        if not present(path, stat.S_IFREG) or not _owns_its_id(path, field):
+            return False
         current = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
+        return False  # ownership that cannot be read is refused, never written
     if (not isinstance(current, dict) or record.get(field) != current.get(field)
             or record_version(current) != expect):
         return False
@@ -493,8 +505,11 @@ def archive_record(path: Path, field: str = "withheld_body") -> bool:
     issued to: the id stays reserved, so it is never issued again."""
     path = Path(path)
     with _ledger_lock(_record_directory(path)):
-        if not path.is_file() or not _owns_its_id(path, field):
-            return False
+        try:
+            if not present(path, stat.S_IFREG) or not _owns_its_id(path, field):
+                return False
+        except OSError:
+            return False  # stays live; it acts only once its ownership reads again
         archive = path.parent / "archive"
         try:
             archive.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -515,10 +530,10 @@ def actionable_records(directory: Path, field: str = "withheld_body"):
     never acts. Returns (actionable [(path, record)], frozen [path])."""
     directory = Path(directory)
     actionable, frozen = [], []
-    if not directory.is_dir():
+    if not present(directory, stat.S_IFDIR):
         return actionable, frozen
     with _ledger_lock(directory):
-        for path in sorted(directory.glob("*.json")):
+        for path in entries(directory, "*.json"):
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -542,7 +557,7 @@ def _find_record(path_of, state_dir: Path, task_id: str, body: str, field: str) 
     """Where the record of this exact body is, without issuing an id."""
     digest, unissued = _body_digest(body), None
     first = path_of(state_dir, task_id)
-    if not first.parent.exists():
+    if not present(first.parent):
         return first
     with _ledger_lock(first.parent):
         for path in _candidates(path_of, state_dir, task_id, body):
@@ -627,7 +642,7 @@ def journal_quarantined_attachment(body: str, state_dir: Path, task_id: str,
 def _write_artifact(path: Path, payload: dict, field: str) -> bool:
     """True only when `path` holds a record of this payload's body: an existing
     record of another body is never claimed as written."""
-    if path.is_file():
+    if present(path, stat.S_IFREG):
         return _holds(path, field, payload[field])
     fd, temporary = tempfile.mkstemp(prefix=".withheld-", suffix=".tmp", dir=path.parent)
     try:
@@ -705,7 +720,7 @@ def withheld_decision_lock(directory: Path):
 
 def _live_undecided_record(path: Path) -> "dict | None":
     # An archived decision for the same review always wins over a live record.
-    if _archived(path).exists():
+    if present(_archived(path)):
         return None
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -727,7 +742,7 @@ def withheld_claim_publishable(path: Path, claim_id) -> bool:
         return False
     with withheld_decision_lock(_record_directory(path)):
         record = _live_undecided_record(path)
-        issued = _issued_claim(path, claim_id).is_file()
+        issued = present(_issued_claim(path, claim_id), stat.S_IFREG)
     return (issued and record is not None and record.get("status") == "publish_pending"
             and record.get("decision") == "false_positive"
             and record.get("decision_claim_id") == claim_id and decision_is_durable(record))
@@ -745,9 +760,9 @@ def archived_withheld_decision(path: Path) -> "dict | None":
     path = Path(path)
     archived = _archived(path)
     with withheld_decision_lock(_record_directory(path)):
-        if not archived.exists():
-            return None
         try:
+            if not present(archived):
+                return None
             record = json.loads(archived.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
@@ -775,7 +790,7 @@ def _proven_superseded(path: Path, field: str) -> bool:
     """A live copy of the very body its archived decision holds, and that decision
     proves an outcome: the one case reconciled instead of frozen. Lock held by caller."""
     archived = _archived(path)
-    if not (path.is_file() and archived.is_file()):
+    if not (present(path, stat.S_IFREG) and present(archived, stat.S_IFREG)):
         return False
     try:
         decision = json.loads(archived.read_text(encoding="utf-8"))
@@ -815,7 +830,7 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
         if (record is None or record.get("status") != "awaiting_owner"
                 or not _owns_its_id(path, "withheld_body")):
             return None
-        if any(_issued_claim(path, "*").parent.glob(f"{path.stem}.*")):
+        if entries(_issued_claim(path, "*").parent, f"{path.stem}.*"):
             return None  # an earlier claim whose decision did not survive: never a second one
         claim_id = os.urandom(16).hex()
         ledger = _issued_claim(path, claim_id)
@@ -863,7 +878,7 @@ def issued_claims(path: Path) -> list:
     """The claim ids issued for this review, oldest name first."""
     path = Path(path)
     return sorted(p.name[len(path.stem) + 1:] for p in
-                  _issued_claim(path, "*").parent.glob(f"{path.stem}.*"))
+                  entries(_issued_claim(path, "*").parent, f"{path.stem}.*"))
 
 
 def record_release_receipt(path: Path, claim_id, event_id: str) -> bool:
@@ -892,7 +907,7 @@ def decision_lost(path: Path) -> bool:
     with _ledger_lock(_record_directory(path)):
         record = _live_undecided_record(path)
         return (record is not None and record.get("status") == "awaiting_owner"
-                and any(_issued_claim(path, "*").parent.glob(f"{path.stem}.*")))
+                and bool(entries(_issued_claim(path, "*").parent, f"{path.stem}.*")))
 
 
 def _fsync_directory(directory: Path) -> None:

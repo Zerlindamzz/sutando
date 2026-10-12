@@ -1163,7 +1163,7 @@ def _reread_record(path: Path) -> dict:
     """The live record, read again while it exists but does not read; {} once it is gone."""
     for _attempt in range(5):
         current = _read_private_json(path)
-        if current is not None or not path.exists():
+        if current is not None or not team_result_guard.present(path):
             return current or {}
     return {}
 
@@ -1359,13 +1359,19 @@ def _lost_decision_notice(path: Path, record: dict) -> str:
             f"applied. {sent} To answer again, remove its claim: {unlock}")
 
 
+def _archived_reply(path: Path) -> bool:
+    present = team_result_guard.present
+    return not present(path) and present(path.parent / "archive" / path.name)
+
+
 def _handle_review_decision(task: dict) -> bool:
     task_id = str(task.get("id") or "")
     if task_id and _control_result_path(task_id).is_file():
         return True
     try:
         matched = _match_review_decision(task)
-    except _ReviewsUnreadable as exc:
+        archived_reply = matched is not None and _archived_reply(matched[0])
+    except (_ReviewsUnreadable, OSError) as exc:
         _log(f"withheld reviews: reply {task.get('id')} could not be checked ({exc})")
         _queue_review_control_result(task, body=(
             "Your reply could not be checked against your pending reviews right now. Nothing "
@@ -1374,7 +1380,7 @@ def _handle_review_decision(task: dict) -> bool:
     if matched is None:
         return False
     path, record, answer = matched
-    if not path.exists() and (path.parent / "archive" / path.name).exists():
+    if archived_reply:
         _log(f"withheld review {path.stem}: already decided; reply {task.get('id')} "
              "answered with the archived outcome")
         outcome = team_result_guard.archived_outcome(record)
