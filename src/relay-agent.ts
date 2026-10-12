@@ -7,8 +7,6 @@
  * answers from it; a result whose call is gone is delivered another way and reconciled.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 import type { PersistentSubagentInstance, SubagentConfig } from 'bodhi-realtime-agent';
 import { frameTaskResult, framedSystem } from './inject-framing.js';
 import type { WorkRequestCheck } from './work-request-check.js';
@@ -36,47 +34,35 @@ export interface VoiceTaskRecord {
 	at: number;
 }
 
-const STORE_VERSION = 2;
 const STORE_CAP = 200;
 
-/** `state/voice-tasks.json`: the voice task table. One writer, atomic, capped; survives a restart. */
-export function createVoiceTaskStore(path: string, now: () => number = Date.now) {
-	const read = (): Record<string, VoiceTaskRecord> => {
-		try {
-			const d = JSON.parse(readFileSync(path, 'utf-8')) as { version?: unknown; tasks?: unknown };
-			if (d.version !== STORE_VERSION || !d.tasks || typeof d.tasks !== 'object') return {};
-			return d.tasks as Record<string, VoiceTaskRecord>;
-		} catch {
-			return {};
-		}
-	};
+/**
+ * The voice task table, in memory: one row per `work` task the user asked for by voice, with where the
+ * core stands and whether the user heard the answer. It lives in the voice agent alone, like the
+ * pending-task map next to it; nothing else reads it (the model reads it through get_task_status).
+ * Capped at the newest STORE_CAP rows.
+ */
+export function createVoiceTaskStore(now: () => number = Date.now) {
+	const tasks = new Map<string, VoiceTaskRecord>();
 	const update = (taskId: string, change: (row: VoiceTaskRecord) => VoiceTaskRecord | null) => {
-		const tasks = read();
-		const next = change(tasks[taskId] ?? { at: 0 });
+		const next = change(tasks.get(taskId) ?? { at: 0 });
 		if (!next) return;
-		tasks[taskId] = { ...next, at: now() };
-		const kept = Object.entries(tasks).sort((a, b) => b[1].at - a[1].at).slice(0, STORE_CAP);
-		try {
-			if (!existsSync(dirname(path))) mkdirSync(dirname(path), { recursive: true });
-			const tmp = `${path}.${process.pid}.tmp`;
-			writeFileSync(tmp, JSON.stringify({ version: STORE_VERSION, tasks: Object.fromEntries(kept) }));
-			renameSync(tmp, path);
-		} catch (err) {
-			// A row that cannot be written costs a possible repeat, never a lost result.
-			console.error(`[RelayAgent] task table write failed: ${err instanceof Error ? err.message : err}`);
+		tasks.set(taskId, { ...next, at: now() });
+		if (tasks.size > STORE_CAP) {
+			for (const [id] of [...tasks.entries()].sort((a, b) => a[1].at - b[1].at).slice(0, tasks.size - STORE_CAP)) tasks.delete(id);
 		}
 	};
 	return {
 		get(taskId: string): VoiceTaskRecord | undefined {
-			return read()[taskId];
+			return tasks.get(taskId);
 		},
 		/** Every row, oldest submission first. */
 		list(): Array<[string, VoiceTaskRecord]> {
-			return Object.entries(read()).sort((a, b) => (a[1].submittedAt ?? a[1].at) - (b[1].submittedAt ?? b[1].at));
+			return [...tasks.entries()].sort((a, b) => (a[1].submittedAt ?? a[1].at) - (b[1].submittedAt ?? b[1].at));
 		},
-		/** A `work` task was submitted. */
-		add(taskId: string, text: string): void {
-			update(taskId, (row) => ({ ...row, text: text.slice(0, 200), submittedAt: now() }));
+		/** A `work` task was submitted (`submittedAt` for a row rebuilt from an older submission). */
+		add(taskId: string, text: string, submittedAt: number = now()): void {
+			update(taskId, (row) => ({ ...row, text: text.slice(0, 200), submittedAt }));
 		},
 		/** The user asked to cancel it. */
 		markCancelRequested(taskId: string): void {
@@ -87,7 +73,7 @@ export function createVoiceTaskStore(path: string, now: () => number = Date.now)
 			const deliver = (row: VoiceTaskRecord) => (row.delivery === 'spoken' && delivery !== 'spoken' ? null : { ...row, delivery });
 			update(taskId, deliver);
 			// The tasks answered in this one's result reached the user with it, whichever way it went.
-			for (const [id, row] of Object.entries(read())) if (row.answeredBy === taskId) update(id, deliver);
+			for (const [id, row] of [...tasks.entries()]) if (row.answeredBy === taskId) update(id, deliver);
 		},
 		noteReplay(taskId: string): void {
 			update(taskId, (row) => ({ ...row, replays: (row.replays ?? 0) + 1 }));
@@ -99,7 +85,7 @@ export function createVoiceTaskStore(path: string, now: () => number = Date.now)
 		setAnsweredBy(taskId: string, target: string): void {
 			if (taskId === target) return;
 			// The answering result may already have been handed over: this task went with it.
-			const reached = read()[target]?.delivery;
+			const reached = tasks.get(target)?.delivery;
 			update(taskId, (row) => ({ ...row, answeredBy: target, ...(reached && row.delivery !== 'spoken' ? { delivery: reached } : {}) }));
 		},
 		/** The user corrected `taskId` with `by`. */
@@ -112,7 +98,7 @@ export function createVoiceTaskStore(path: string, now: () => number = Date.now)
 		},
 		/** The rows the core answered in `target`'s result. */
 		answeredBy(target: string): Array<[string, VoiceTaskRecord]> {
-			return Object.entries(read()).filter(([, row]) => row.answeredBy === target);
+			return [...tasks.entries()].filter(([, row]) => row.answeredBy === target);
 		},
 	};
 }

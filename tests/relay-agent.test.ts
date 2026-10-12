@@ -24,7 +24,7 @@ const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe('relay agent subagent: the work call returns its task\'s result', () => {
 	function agent(submitted: Record<string, unknown>) {
-		const store = createVoiceTaskStore(join(TMP, `relay-${Math.random()}.json`));
+		const store = createVoiceTaskStore();
 		const notices: string[] = [];
 		const relay = new RelayAgent({ submit: async () => submitted, store, notice: (t) => notices.push(t) });
 		return { relay, store, notices };
@@ -105,7 +105,7 @@ describe('relay agent subagent: the work call returns its task\'s result', () =>
 	});
 
 	it('a result answering several tasks ends their waiting calls too, and records them all', async () => {
-		const store = createVoiceTaskStore(join(TMP, `multi-${Math.random()}.json`));
+		const store = createVoiceTaskStore();
 		const ids = ['task-a', 'task-b', 'task-c'];
 		let n = 0;
 		const relay = new RelayAgent({ submit: async () => pending(ids[n++]), store });
@@ -130,7 +130,7 @@ describe('relay agent subagent: the work call returns its task\'s result', () =>
 
 describe('relay agent: a text model checks a request before it is submitted', () => {
 	function agent(check: (input: { task: string; recentConversation: string }) => Promise<{ action: 'submit' } | { action: 'ask'; question: string }>) {
-		const store = createVoiceTaskStore(join(TMP, `relay-check-${Math.random()}.json`));
+		const store = createVoiceTaskStore();
 		const submitted: string[] = [];
 		const logs: string[] = [];
 		const relay = new RelayAgent({
@@ -182,7 +182,7 @@ describe('relay agent: a text model checks a request before it is submitted', ()
 describe('relay agent: a work call waits until the user has finished speaking', () => {
 	// Short times stand in for the real 1.5 s quiet and 30 s hold.
 	function agent(maxHoldMs = 2_000) {
-		const store = createVoiceTaskStore(join(TMP, `relay-speech-${Math.random()}.json`));
+		const store = createVoiceTaskStore();
 		const speech = createSpeechGate({ quietMs: 60, maxHoldMs });
 		const submitted: Record<string, unknown>[] = [];
 		let n = 0;
@@ -302,33 +302,29 @@ describe('frameResult', () => {
 });
 
 describe('voice task store', () => {
-	it('survives a restart: a new store on the same file reads what the old one wrote', () => {
-		const path = join(TMP, 'state', 'restart.json');
-		createVoiceTaskStore(path).set('task-a', 'spoken');
-		assert.equal(createVoiceTaskStore(path).get('task-a')?.delivery, 'spoken');
+	it('is one table in memory: what one caller writes, another reads', () => {
+		voiceTaskStore.set('task-shared', 'spoken');
+		assert.equal(voiceTaskStore.get('task-shared')?.delivery, 'spoken');
 	});
 
 	it('never downgrades a spoken result', () => {
-		const s = createVoiceTaskStore(join(TMP, 'state', 'down.json'));
+		const s = createVoiceTaskStore();
 		s.set('task-b', 'spoken');
 		s.set('task-b', 'dm');
 		assert.equal(s.get('task-b')?.delivery, 'spoken');
 	});
 
-	it('keeps at most 200 tasks, newest first, and a foreign file reads as empty', () => {
-		const path = join(TMP, 'state', 'cap.json');
+	it('keeps at most 200 tasks, newest first', () => {
 		let t = 0;
-		const s = createVoiceTaskStore(path, () => ++t);
+		const s = createVoiceTaskStore(() => ++t);
 		for (let i = 0; i < 205; i++) s.set(`task-${i}`, 'spoken');
-		const tasks = JSON.parse(readFileSync(path, 'utf-8')).tasks as Record<string, unknown>;
-		assert.equal(Object.keys(tasks).length, 200);
-		assert.ok(!('task-0' in tasks) && 'task-204' in tasks);
-		writeFileSync(path, '{"tasks": "nope"}');
-		assert.equal(s.get('task-204'), undefined);
+		const ids = s.list().map(([id]) => id);
+		assert.equal(ids.length, 200);
+		assert.ok(!ids.includes('task-0') && ids.includes('task-204'));
 	});
 
 	it('keeps a row per voice task: text, submission, cancel asked, delivery', () => {
-		const st = createVoiceTaskStore(join(TMP, 'state', 'rows.json'));
+		const st = createVoiceTaskStore();
 		st.add('task-r', 'check PR 3509');
 		st.markCancelRequested('task-r');
 		st.set('task-r', 'dm');
@@ -342,7 +338,7 @@ describe('voice task store', () => {
 
 describe('a result that answers several requests (the core deduped them into it)', () => {
 	it('the table records which result answered a task, and lists the tasks a result answered', () => {
-		const store = createVoiceTaskStore(join(TMP, `ab-${Math.random()}.json`));
+		const store = createVoiceTaskStore();
 		store.add('task-a', 'check PR 5308');
 		store.add('task-b', 'check PR 5309');
 		store.add('task-c', 'check PR 5310');
@@ -429,9 +425,9 @@ describe('reconcile pass (task-bridge, temp workspace)', () => {
 		assert.deepEqual(owed.filter((o) => o.taskId === id), [{ text: 'PR 3509 has two approvals and green CI.', note: MISSED_RESULT_NOTE, taskId: id }]);
 	});
 
-	it('a result already heard owes nothing, also when the row comes back from disk after a restart', () => {
+	it('a result already heard owes nothing', () => {
 		const id = finished('check PR 4000', 'PR 4000 is merged.');
-		createVoiceTaskStore(join(TMP, 'state', 'voice-tasks.json')).set(id, 'spoken');
+		voiceTaskStore.set(id, 'spoken');
 		reconcileVoiceTasks(deliver, () => false);
 		assert.ok(!owed.some((o) => o.taskId === id));
 	});
@@ -576,23 +572,6 @@ describe('every status answer comes from the one table', () => {
 		assert.match(describeVoiceTasks(rows), /1 ended with nothing to say \("cleared \[no-send\]"\)/);
 		const tool = src('voice-agent.ts').split("name: 'get_task_status'")[1].split('};')[0];
 		assert.ok(tool.includes('voiceTaskCounts(rows)') && tool.includes('pendingTasks: counts.pending') && !tool.includes('openTasks'), 'the tool reports the table\'s count');
-	});
-
-	it('the live status snapshot carries every row, newest first, with the same pending count as the tool', async () => {
-		const { voiceTaskStatusSnapshot, voiceTaskCounts } = await import('../src/inline-tools.js');
-		const row = (text: string, submittedAt: number, state: string, delivery?: string, retired?: boolean) => ({ id: text, text, submittedAt, state, delivery, retired }) as never;
-		const rows = [row('PR 5302', 1, 'done', 'spoken'), row('PR 5167', 2, 'done'), row('PR 5329', 3, 'started'), row('cleared', 4, 'done', undefined, true), row('dm one', 5, 'done', 'dm')];
-		const snap = voiceTaskStatusSnapshot(rows, 99);
-		assert.equal(snap.at, 99);
-		assert.deepEqual({ pending: snap.pending, working: snap.working, doneNotHeard: snap.doneNotHeard }, voiceTaskCounts(rows));
-		assert.deepEqual(snap.tasks.map((t) => t.id), ['dm one', 'cleared', 'PR 5329', 'PR 5167', 'PR 5302'], 'newest first');
-		assert.deepEqual(snap.tasks.map((t) => t.pending), [true, false, true, true, false]);
-		assert.deepEqual(snap.tasks.map((t) => t.heard), [false, false, false, false, true]);
-		assert.equal(snap.tasks[1].retired, true);
-		assert.equal(snap.tasks[0].delivery, 'dm');
-		// The voice agent writes it and the web client serves it: one file, one number.
-		assert.ok(src('voice-agent.ts').includes("statusPath('voice-task-status.json', WORKSPACE_DIR)"));
-		assert.ok(src('web-client.ts').includes("url.pathname === '/voice-tasks'") && src('web-client.ts').includes("'voice-task-status.json'"));
 	});
 
 	it('describeVoiceTasks groups the user\'s tasks by where each stands and whether the result was heard', async () => {
@@ -756,7 +735,7 @@ describe('which open voice tasks a summary speaks for', () => {
 	});
 
 	it('5167 is not 51167; every mark must appear; heard and corrected rows are left out', () => {
-		const store = createVoiceTaskStore(join(TMP, `covers-${Math.random()}.json`));
+		const store = createVoiceTaskStore();
 		store.add('task-a', 'Check PR #5302'); store.add('task-b', 'Check PR #5167'); store.add('task-c', 'weather');
 		store.add('task-d', 'Check PR #5229'); store.set('task-d', 'spoken');
 		store.add('task-e', 'Check PR #51167'); store.setSupersededBy('task-e', 'task-b');

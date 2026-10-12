@@ -30,9 +30,9 @@
 import 'dotenv/config';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
-import { existsSync, readFileSync, unlinkSync, mkdirSync, copyFileSync, appendFileSync, writeFileSync, realpathSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, mkdirSync, copyFileSync, appendFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { notify as platformNotify } from './platform.js';
-import { inlineTools, personalSkillSetups, personalVoiceSurface, describeVoiceTasks, voiceTaskCounts, voiceTaskStatusSnapshot } from './inline-tools.js';
+import { inlineTools, personalSkillSetups, personalVoiceSurface, describeVoiceTasks, voiceTaskCounts } from './inline-tools.js';
 import { createClientFrameHub } from './client-frame-hub.js';
 import { runSkillSetups } from './skill-setup-runner.js';
 import { setVisionSession, startVisionControlServer, stopVisionControlServer, setSessionToolUpdater, setVisionSpeechEvidence, getVisionEgressStats, isStreaming, stopStreaming as stopVisionStreaming } from './vision-tools.js';
@@ -976,26 +976,6 @@ async function main() {
 		log: (msg) => console.log(`${ts()} ${msg}`),
 	});
 	setVoiceTaskEndedListener((taskId, why) => { relayAgent.endCall(taskId, why); });
-
-	// The task table as the user can watch it live, also during a call: state/voice-task-status.json,
-	// rewritten whenever its content changes (the web client serves it at /voice-tasks and /voice-tasks/view).
-	const voiceTaskStatusFile = statusPath('voice-task-status.json', WORKSPACE_DIR);
-	let lastVoiceTaskStatus = '';
-	const publishVoiceTaskStatus = () => {
-		try {
-			const snap = voiceTaskStatusSnapshot(voiceTaskRows());
-			const body = JSON.stringify({ ...snap, at: 0 });
-			if (body === lastVoiceTaskStatus) return;
-			lastVoiceTaskStatus = body;
-			const tmp = `${voiceTaskStatusFile}.tmp`;
-			writeFileSync(tmp, JSON.stringify(snap));
-			renameSync(tmp, voiceTaskStatusFile);
-		} catch (e) {
-			console.error(`${ts()} [RelayAgent] voice-task-status.json not written:`, e);
-		}
-	};
-	publishVoiceTaskStatus();
-	setInterval(publishVoiceTaskStatus, 1_000).unref();
 
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,

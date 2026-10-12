@@ -484,7 +484,7 @@ function _hasResult(taskId: string): boolean {
 }
 
 /** The relay agent's task table: one row per voice task; survives a voice-agent restart. */
-export const voiceTaskStore = createVoiceTaskStore(join(REPO_DIR, 'state', 'voice-tasks.json'));
+export const voiceTaskStore = createVoiceTaskStore();
 
 /** The task's result text, live or archived (this month or last); null when there is none. */
 function _readResultText(taskId: string): string | null {

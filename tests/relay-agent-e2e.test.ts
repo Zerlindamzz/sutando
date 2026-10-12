@@ -14,7 +14,7 @@ mkdirSync(join(TMP, 'tasks'), { recursive: true });
 mkdirSync(join(TMP, 'results'), { recursive: true });
 
 const { wireDurableChannels } = await import('../src/live-agent-runtime.js');
-const { RelayAgent, createVoiceTaskStore, NOT_PICKED_MS } = await import('../src/relay-agent.js');
+const { RelayAgent, NOT_PICKED_MS } = await import('../src/relay-agent.js');
 const { voiceTaskStore, setVoiceTaskEndedListener, voiceTaskRows } = await import('../src/task-bridge.js');
 const { voiceTaskCounts } = await import('../src/inline-tools.js');
 
@@ -276,7 +276,7 @@ describe('relay agent end to end', () => {
 	it('a "not picked up" notice still waiting its turn is dropped once the task has been answered', async () => {
 		const id = `task-19000${String(++seq).padStart(8, '0')}`;
 		writeFileSync(join(TMP, 'tasks', `${id}.txt`), `id: ${id}\nsource: voice\ntask: is the fish good\n`);
-		createVoiceTaskStore(join(TMP, 'state', 'voice-tasks.json'), () => Date.now() - NOT_PICKED_MS - 60_000).add(id, 'is the fish good');
+		voiceTaskStore.add(id, 'is the fish good', Date.now() - NOT_PICKED_MS - 60_000);
 		submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true };
 		const call = relay.invoke('Execute tool: work', {});
 		await tick(0);
