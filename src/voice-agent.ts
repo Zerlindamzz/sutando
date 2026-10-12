@@ -72,6 +72,7 @@ import { recordToolCall } from './conversation-store.js';
 import { buildGreeting, buildInstructions, type VoiceConfigContext } from './voice-agent-config.js';
 import { wireDurableChannels, createSessionRecorder } from './live-agent-runtime.js';
 import { RelayAgent, relayAgentSubagentConfig, createSpeechGate } from './relay-agent.js';
+import { createGeminiWorkCheck } from './work-request-check.js';
 import {
 	classifyTransportClose,
 	fatalCloseForRecovery,
@@ -968,6 +969,9 @@ async function main() {
 		submit: submitWorkTask,
 		store: voiceTaskStore,
 		speech: speechGate,
+		// A text model, not the voice model, decides whether a request is complete enough to submit.
+		check: createGeminiWorkCheck({ apiKey: () => GEMINI_VOICE_API_KEY, log: (m) => console.log(`${ts()} ${m}`) }),
+		recentConversation: () => getRecentConversation(8),
 		notice: (text) => { sessionRef?.tryPublishSystemNotification(text); },
 		log: (msg) => console.log(`${ts()} ${msg}`),
 	});

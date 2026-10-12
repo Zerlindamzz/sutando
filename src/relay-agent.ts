@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path';
 import type { PersistentSubagentInstance, SubagentConfig } from 'bodhi-realtime-agent';
 import { frameTaskResult, framedSystem } from './inject-framing.js';
+import type { WorkRequestCheck } from './work-request-check.js';
 
 /** How a voice task's result reached the user. `injected`: handed to the model, turn never confirmed. */
 export type Delivery = 'spoken' | 'injected' | 'dm';
@@ -434,6 +435,10 @@ export interface RelayAgentDeps {
 	notice?: (text: string) => void;
 	/** Holds each call until the user has finished speaking. Without it, calls are submitted at once. */
 	speech?: SpeechGate;
+	/** Decides, before a request is submitted, whether the user must first be asked for a missing piece. */
+	check?: WorkRequestCheck;
+	/** The recent conversation the check reads. */
+	recentConversation?: () => string;
 	log?: (msg: string) => void;
 }
 
@@ -483,6 +488,15 @@ export class RelayAgent implements PersistentSubagentInstance {
 			await this.deps.speech.waitTurnOver(signal);
 			if (mine.joined) return framedSystem(ENDED.continued_in_next);
 			if (this.holding === mine) this.holding = null;
+		}
+		if (this.deps.check) {
+			// A request with a blank in it (which PR? which file?) is not submitted: the user is asked.
+			const verdict = await this.deps.check({ task: String(args.task ?? ''), recentConversation: this.deps.recentConversation?.() ?? '' }, signal)
+				.catch(() => ({ action: 'submit' as const }));
+			if (verdict.action === 'ask') {
+				this.deps.log?.(`[RelayAgent] not submitted, asking the user: ${verdict.question}`);
+				return framedSystem(`Nothing was submitted: the request does not say what it is about. Ask the user now, in their language, exactly: "${verdict.question.replace(/"/g, "'")}" Then, with their answer, call work again.`);
+			}
 		}
 		const submitted = await this.deps.submit(args);
 		const taskId = submitted.taskId;

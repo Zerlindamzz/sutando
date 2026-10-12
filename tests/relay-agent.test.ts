@@ -128,6 +128,57 @@ describe('relay agent subagent: the work call returns its task\'s result', () =>
 	});
 });
 
+describe('relay agent: a text model checks a request before it is submitted', () => {
+	function agent(check: (input: { task: string; recentConversation: string }) => Promise<{ action: 'submit' } | { action: 'ask'; question: string }>) {
+		const store = createVoiceTaskStore(join(TMP, `relay-check-${Math.random()}.json`));
+		const submitted: string[] = [];
+		const logs: string[] = [];
+		const relay = new RelayAgent({
+			store,
+			check,
+			recentConversation: () => 'user: 帮我查一下那个 PR 的状态',
+			log: (m) => logs.push(m),
+			submit: async (args) => { submitted.push(String(args.task)); return { status: 'pending', taskId: 'task-c1', queuedAhead: 0, watcherOnline: true, message: 'm' }; },
+		});
+		return { relay, submitted, logs };
+	}
+
+	it('a request with a blank in it is not submitted: the model is told to ask the user', async () => {
+		// 2026-10-12 03:08 and 03:17: "帮我查一下那个 PR 的状态" became the task "查一下PR的状态".
+		const seen: Array<{ task: string; recentConversation: string }> = [];
+		const { relay, submitted, logs } = agent(async (input) => { seen.push(input); return { action: 'ask', question: '你说的是哪个 PR？' }; });
+		const out = await relay.invoke('w', { task: '查一下PR的状态' });
+		assert.deepEqual(submitted, [], 'nothing submitted');
+		assert.match(out, /Nothing was submitted/);
+		assert.match(out, /Ask the user now, in their language, exactly: "你说的是哪个 PR？"/);
+		assert.deepEqual(seen, [{ task: '查一下PR的状态', recentConversation: 'user: 帮我查一下那个 PR 的状态' }], 'the check reads the request and the recent words');
+		assert.ok(logs.some((l) => l.includes('not submitted, asking the user: 你说的是哪个 PR？')));
+	});
+
+	it('a complete request is submitted as before', async () => {
+		const { relay, submitted } = agent(async () => ({ action: 'submit' }));
+		void relay.invoke('w', { task: 'check PR 5302' });
+		await tick(10);
+		assert.deepEqual(submitted, ['check PR 5302']);
+	});
+
+	it('a check that fails lets the request through', async () => {
+		const { relay, submitted } = agent(async () => { throw new Error('model down'); });
+		void relay.invoke('w', { task: 'check PR 5302' });
+		await tick(10);
+		assert.deepEqual(submitted, ['check PR 5302'], 'never blocks work');
+	});
+
+	it('the model\'s reply is read as a decision; anything unclear means submit', async () => {
+		const { parseWorkCheck } = await import('../src/work-request-check.js');
+		assert.deepEqual(parseWorkCheck('{"action":"ask","question":"Which PR?"}'), { action: 'ask', question: 'Which PR?' });
+		assert.deepEqual(parseWorkCheck('```json\n{"action": "ask", "question": "哪个文件？"}\n```'), { action: 'ask', question: '哪个文件？' });
+		assert.deepEqual(parseWorkCheck('{"action":"submit"}'), { action: 'submit' });
+		assert.deepEqual(parseWorkCheck('{"action":"ask"}'), { action: 'submit' }, 'an ask with no question is not an ask');
+		assert.deepEqual(parseWorkCheck('sure, go ahead'), { action: 'submit' });
+	});
+});
+
 describe('relay agent: a work call waits until the user has finished speaking', () => {
 	// Short times stand in for the real 1.5 s quiet and 30 s hold.
 	function agent(maxHoldMs = 2_000) {
