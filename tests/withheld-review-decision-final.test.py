@@ -1927,9 +1927,8 @@ check(raised is None and handled is True
       and any("unwritable-answer not saved" in line for line in logs[logs_before:]),
       f"an unsaved answer is logged, never raised (raised={raised!r}, handled={handled})")
 
-# 25r. An archive whose existence cannot be read is unknown, never absent: a live publish_pending
-# copy beside a kept_private decision never posts. "emulated" reads unreadable as absent, as
-# Python 3.14's exists()/is_file()/is_dir() do, on any interpreter; "chmod" uses a real mode 000.
+# 25r. An unreadable archive is unknown, never absent: a publish_pending copy beside a kept_private
+# decision never posts, under 3.14's reading (emulated on any Python) and a real mode 000.
 @contextlib.contextmanager
 def unreadable_like_314(target, stat=True, listing=False):
     target = pathlib.Path(target)
