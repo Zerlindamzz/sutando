@@ -120,8 +120,8 @@ def _load_runtime_health():
 # with the caret on its "Switch to <fallback> and continue" row.
 from delivery.pane_gate import (  # noqa: E402
     ADAPTERS, AWAIT_HINT, BORDER_LINE, CLAUDE, CLAUDE_GATE_SIGNATURES, CLAUDE_IDLE,
-    COMPOSER_PLACEHOLDER, FABLE_TEXT, classify_pane as _pg_classify_pane,
-    composer_text as _pg_composer_text,
+    COMPOSER_PLACEHOLDER, FABLE_TEXT, TURN_DONE, classify_pane as _pg_classify_pane,
+    composer_text as _pg_composer_text, live_tail,
 )
 
 _FABLE_TEXT = FABLE_TEXT
@@ -153,10 +153,7 @@ def _refusal_line(line: str) -> bool:
     return bool(_REFUSAL.search(line)) or cli_wedge.needs_login_line(line)
 
 
-# The completed-turn line: "✻ Worked for 0s" / "✻ Cooked for 1s · done 12:32 PM". The spinner
-# reuses the glyph ("✻ Perambulating… (1m 46s · …)") and must not match.
-_TURN_DONE = re.compile(
-    r"^\s*✻\s+[A-Za-z]+(?:\s+for\s+(?P<dur>\d+[hms](?:\s+\d+[hms])*))?(?:\s*·\s*done\b.*)?\s*$")
+_TURN_DONE = TURN_DONE
 _TURN_SHORT = re.compile(r"[01]s")
 _PROMPT_LINE = re.compile(r"^\s*❯")
 # The CLI's hint in an EMPTY composer (`❯ Try "refactor <filepath>"`); it vanishes
@@ -205,8 +202,9 @@ def auto_answer(kind):
 
 
 def classify(pane: str):
-    """Return (kind, excerpt) if the pane is awaiting user input, else None."""
-    tail = "\n".join([ln for ln in pane.splitlines() if ln.strip()][-14:])
+    """Return (kind, excerpt) if the pane is awaiting user input, else None.
+    Only rows below the last turn spinner / completion line are read (pane_gate.live_tail)."""
+    tail = "\n".join(live_tail([ln for ln in pane.splitlines() if ln.strip()][-14:]))
     if not _AWAIT_HINT.search(tail):
         return None
     # Idle-footer suppression: the normal footer ("⏵⏵ bypass permissions on … ←
