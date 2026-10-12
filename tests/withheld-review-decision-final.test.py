@@ -2066,7 +2066,8 @@ with unreadable_like_314(archive_dir):
     finally:
         reservation.write_text(saved_reservation)
     real_match = bridge._match_review_decision
-    bridge._match_review_decision = lambda task: (path, json.loads(path.read_text()), "no")
+    decided = path.with_name("wr_ffffffffffffffff.json")  # no live copy: only its archive decides
+    bridge._match_review_decision = lambda task: (decided, json.loads(path.read_text()), "no")
     try:
         before = len(shared_posts())
         site["handle-contains"] = (bridge._handle_review_decision(decision("No", rid, "site-handle"))
