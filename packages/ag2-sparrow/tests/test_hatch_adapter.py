@@ -416,7 +416,7 @@ class HookScript(Base):
         for phrase in ("room.message.send", "thread_root set to its thread_root",
                        "(or its event_id when thread_root is null)",
                        "reply_to set to its event_id", "mentions set to [its sender]",
-                       "copied exactly", "tagging its sender",
+                       "copied exactly", "tagging its sender", "full Matrix ID (@name:server",
                        "needs no answer", "especially from another agent", "post nothing for it",
                        "do NOT ask for it in the room", "HANDOFF", "room_id", "event_id",
                        "sender:", "reply:", "result_file", "[REPLIED]", "[no-send]"):

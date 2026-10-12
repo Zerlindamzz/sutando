@@ -214,7 +214,8 @@ Each wake carries, per message, `room_id`, `event_id`, `thread_root`, `sender`,
 `access_tier` and `collaborator` read with Sparrow's own task-header parser,
 plus a `worker_note` with the rules: touch the activity marker first, reply
 with `room.message.send` in the message's thread (`thread_root`, `reply_to`,
-`mentions` copied exactly, sender tagged), post nothing when no answer is
+`mentions` copied exactly, sender tagged, anyone tagged by full Matrix ID
+(`@name:server`), never a short `@name`), post nothing when no answer is
 needed, close each item by writing `[REPLIED]` or `[no-send]` to its
 `result_file`, and end with a `HANDOFF` block for work that needs GitHub,
 connectors, credentials or a browser. For a sender who is not the owner, the
