@@ -5,15 +5,18 @@ archived decision. Drives the production guard + bridge functions with a fake re
 from __future__ import annotations
 
 import builtins
+import importlib
 import contextlib
 import io
 import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 REAL_HOME = pathlib.Path(os.path.expanduser("~")).resolve()
@@ -873,53 +876,6 @@ archived.write_text("{not json")
 check(guard.archived_withheld_decision(path) == {}, "an unreadable archive reads as {}")
 bridge._STATE = root / "state"
 
-# 16. A landed POST is never sent again. The POST lands, a card resolver bumps the record,
-# and the reread fails: the publication is reconciled from the posted sentinel, no POST.
-for label, failing_reads in (("transient", 1), ("persistent", 99)):
-    bridge._STATE = root / f"posted-{label}"
-    path, rid = new_review(f"task-posted-{label}")
-    claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
-    real_read, reads_left = bridge._read_private_json, [failing_reads]
-
-    def failing_read(candidate, _path=path):
-        if candidate == _path and reads_left[0] > 0:
-            reads_left[0] -= 1
-            return None
-        return real_read(candidate)
-
-    def post_then_bump(method, url, payload=None, timeout=35, _path=path):
-        answer = fake_req(method, url, payload, timeout)
-        if url == "/v1/room" and payload.get("room_id") == SHARED and "bumped" not in stage:
-            stage["bumped"] = bridge._resolve_review_card(_path, json.loads(_path.read_text()))
-            bridge._read_private_json = failing_read
-        return answer
-
-    stage.pop("bumped", None)
-    before = len(shared_posts())
-    bridge._req = post_then_bump
-    try:
-        first = bridge._publish_review(path, claimed)
-    finally:
-        bridge._req, bridge._read_private_json = fake_req, real_read
-    for _beat in range(2):
-        bridge._retry_withheld_reviews()
-    _live, record = final_record(path)
-    check(stage.get("bumped") is True and first is (label == "transient")
-          and len(shared_posts()) - before == 1 and record["status"] == "published",
-          f"{label} unreadable reread: one POST, then published from the sentinel "
-          f"({len(shared_posts()) - before} posts, {record['status']})")
-
-# 16b. An unreadable posted sentinel never leads to a POST.
-bridge._STATE = root / "posted-unreadable"
-path, rid = new_review("task-posted-unreadable")
-claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
-sentinel = path.parent / guard.PUBLISHED_DIR / f"{path.stem}.json"
-sentinel.parent.mkdir(exist_ok=True)
-sentinel.write_text("{not json")
-before = len(shared_posts())
-check(bridge._publish_review(path, claimed) is False and len(shared_posts()) == before,
-      "an unreadable posted sentinel: no POST, the publication stays pending")
-
 # 17. Through the real poll loop: Yes is consumed and archived on one poll; a later No for the
 # same review on the next poll is answered with the archived outcome, never handed to chat.
 bridge._STATE = root / "states" / "later-reply"
@@ -1011,35 +967,6 @@ elsewhere = {**decision("No", rid, "elsewhere-no"), "channel_id": "!another-room
 check(bridge._match_review_decision(elsewhere) is None,
       "a reply from another room never matches a decided review")
 bridge._STATE = root / "state"
-
-# 20. Publication evidence is bound to the active claim: a sentinel for another claim, an
-# empty one, or one without an event id neither POSTs nor commits the review as published.
-for label, evidence in (("other-claim", {"claim_id": "ab" * 16, "event_id": "$wrong"}),
-                        ("empty", {}), ("no-event", {"event_id": ""})):
-    bridge._STATE = root / f"sentinel-{label}"
-    path, rid = new_review(f"task-sentinel-{label}")
-    claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
-    if label != "other-claim":
-        evidence = dict(evidence, claim_id=claimed["decision_claim_id"])
-    evidence.setdefault("dedupe_key", f"withheld-publish:{rid}")
-    sentinel = path.parent / guard.PUBLISHED_DIR / f"{path.stem}.json"
-    sentinel.parent.mkdir(exist_ok=True)
-    sentinel.write_text(json.dumps(evidence))
-    before = len(shared_posts())
-    published = bridge._publish_review(path, claimed)
-    bridge._retry_pending_publications()
-    record = json.loads(path.read_text())
-    check(published is False and len(shared_posts()) == before
-          and record["status"] == "publish_pending" and "published_event_id" not in record,
-          f"{label} sentinel: no POST and not committed ({record['status']})")
-bridge._STATE = bridge._STATE.parent / "sentinel-bound"
-path, rid = new_review("task-sentinel-bound")
-claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
-guard.record_publication(path, claimed["decision_claim_id"], "$landed", f"withheld-publish:{rid}")
-before = len(shared_posts())
-check(bridge._publish_review(path, claimed) is True and len(shared_posts()) == before
-      and json.loads(path.read_text())["published_event_id"] == "$landed",
-      "a sentinel bound to the active claim commits the publication without a POST")
 
 # 21. A later reply to an archive that is not a recognised outcome is consumed, never sent
 # to chat, and answered without claiming an outcome; nothing changes.
@@ -1142,7 +1069,6 @@ try:
     claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
     current = json.loads(path.read_text())
     guard.update_record(path, dict(current, dm_sent_at=1.0), expect=guard.record_version(current))
-    guard.record_publication(path, claimed["decision_claim_id"], "$e", f"withheld-publish:{rid}")
     current = json.loads(path.read_text())
     guard.update_record(path, dict(current, status="published", card_resolution_pending=False),
                         expect=guard.record_version(current))
@@ -1164,6 +1090,315 @@ finally:
 kinds = {name for name, _where in locked_writes}
 check(unlocked == [] and {"link", "unlink", "replace"} <= kinds,
       f"every record write holds the ledger lock: {unlocked}; seen locked {sorted(kinds)}")
+bridge._STATE = root / "state"
+
+# 24. The release goes through the outbox. Only an event id confirms it: {"ok": true}
+# without one may have landed, so it parks and is never sent again; the record stays pending.
+
+
+outbox_mod = importlib.import_module("ag2_sparrow.outbox")
+ProviderPermanentRefused = importlib.import_module("ag2_sparrow.delivery_core").ProviderPermanentRefused
+
+
+def release(label, answer_for_room):
+    bridge._STATE = root / f"outbox-{label}"
+    path, rid = new_review(f"task-outbox-{label}")
+    claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
+
+    def room_req(method, url, payload=None, timeout=35):
+        if url == "/v1/room" and (payload or {}).get("room_id") == SHARED:
+            calls.append((method, url, payload))
+            return answer_for_room()
+        return fake_req(method, url, payload, timeout)
+    return path, rid, claimed, room_req
+
+
+def run_publish(path, claimed, room_req, beats=3):
+    bridge._req = room_req
+    try:
+        first = bridge._publish_review(path, claimed)
+        for _beat in range(beats):
+            bridge._retry_pending_publications()
+    finally:
+        bridge._req = fake_req
+    return first
+
+
+def outbox_item(path, rid, claimed):
+    return outbox_mod.read_item(bridge._STATE / "withheld-review-outbox",
+                                f"{rid}.{claimed['decision_claim_id']}") or {}
+
+
+path, rid, claimed, room_req = release("ok-no-id", lambda: {"ok": True})
+before = len(shared_posts())
+first = run_publish(path, claimed, room_req)
+record = json.loads(path.read_text())
+check(first is False and len(shared_posts()) - before == 1 and record["status"] == "publish_pending"
+      and outbox_item(path, rid, claimed).get("reason") == "outcome-unknown",
+      f"ok without an event id: not published, parked unknown, never re-sent ({record['status']})")
+
+path, rid, claimed, room_req = release("event-only", lambda: {"event_id": "$only"})
+before = len(shared_posts())
+first = run_publish(path, claimed, room_req)
+_live, record = final_record(path)
+check(first is True and len(shared_posts()) - before == 1 and record["status"] == "published"
+      and record["published_event_id"] == "$only",
+      f"an event-id-only receipt is published once ({record['status']})")
+
+
+def http_error(code):
+    def raise_it():
+        raise urllib.error.HTTPError("http://relay.invalid/v1/room", code, "refused", {}, None)
+    return raise_it
+
+
+path, rid, claimed, room_req = release("refused", http_error(400))
+before = len(shared_posts())
+run_publish(path, claimed, room_req)
+_live, record = final_record(path)
+check(len(shared_posts()) - before == 1 and record["status"] == "publish_failed"
+      and record["publish_error"] == "permanent-refusal",
+      f"a definite refusal is publish_failed after one POST ({record['status']})")
+
+path, rid, claimed, room_req = release("server-error", http_error(503))
+before = len(shared_posts())
+run_publish(path, claimed, room_req)
+check(len(shared_posts()) - before == 1 and json.loads(path.read_text())["status"] == "publish_pending",
+      "a 5xx may have applied: parked, never re-sent, still pending")
+
+path, rid, claimed, room_req = release("auth", http_error(401))
+before = len(shared_posts())
+run_publish(path, claimed, room_req, beats=0)
+check(len(shared_posts()) - before == 1 and outbox_item(path, rid, claimed).get("status") == "READY"
+      and json.loads(path.read_text())["status"] == "publish_pending",
+      "an auth refusal did not apply: the outbox schedules a retry, the record stays pending")
+try:
+    bridge._withheld_outbox().provider.deliver("bad", b"not json", "bad#0")
+    malformed = None
+except ProviderPermanentRefused as exc:
+    malformed = exc
+check(malformed is not None, "a malformed outbox payload is a definite refusal, never sent")
+
+def lost_in_transport():
+    raise TimeoutError("no reply from the gateway")
+
+
+path, rid, claimed, room_req = release("transport", lost_in_transport)
+before = len(shared_posts())
+run_publish(path, claimed, room_req)
+check(len(shared_posts()) - before == 1 and json.loads(path.read_text())["status"] == "publish_pending"
+      and outbox_item(path, rid, claimed).get("reason") == "outcome-unknown",
+      "a lost reply may have landed: parked, never re-sent, still pending")
+
+path, rid, claimed, room_req = release("declined", lambda: {"ok": False, "error": "no such room"})
+before = len(shared_posts())
+run_publish(path, claimed, room_req)
+_live, record = final_record(path)
+check(len(shared_posts()) - before == 1 and record["status"] == "publish_failed",
+      f"an explicit decline is a definite refusal: publish_failed ({record['status']})")
+check(bridge._withheld_outbox().provider.reconcile(None) is None,
+      "the room provider has no read-back to reconcile from")
+
+# 24a. A confirmed send whose record write is refused (a card resolver committed meanwhile)
+# and whose first reread is unreadable reads again and commits; nothing is re-sent.
+path, rid, claimed, room_req = release("reread", lambda: {"event_id": "$reread"})
+real_read, reads_left = bridge._read_private_json, [1]
+
+
+def unreadable_once(candidate, _path=path):
+    if candidate == _path and reads_left[0] > 0:
+        reads_left[0] -= 1
+        return None
+    return real_read(candidate)
+
+
+def confirm_then_bump(method, url, payload=None, timeout=35, _path=path, _room_req=room_req):
+    answer = _room_req(method, url, payload, timeout)
+    if url == "/v1/room" and (payload or {}).get("room_id") == SHARED:
+        bridge._resolve_review_card(_path, json.loads(_path.read_text()))
+        bridge._read_private_json = unreadable_once
+    return answer
+
+
+before = len(shared_posts())
+bridge._req = confirm_then_bump
+try:
+    committed = bridge._publish_review(path, claimed)
+finally:
+    bridge._req, bridge._read_private_json = fake_req, real_read
+run_publish(path, claimed, room_req)
+_live, record = final_record(path)
+check(committed is True and reads_left == [0] and len(shared_posts()) - before == 1
+      and record["status"] == "published",
+      f"an unreadable reread is read again, never re-sent ({record['status']})")
+
+# 24b. A crash at each outbox stage never posts beyond the outbox's guarantee. A restart is
+# modelled by the claim's owner being a dead process past the reclaim window.
+class Crash(BaseException):
+    pass
+
+
+dead = subprocess.Popen([sys.executable, "-c", "pass"])
+dead.wait()
+
+
+def owner_died(path, rid, claimed):
+    root_dir = bridge._STATE / "withheld-review-outbox"
+    claim_file = outbox_mod._claim_path(root_dir, f"{rid}.{claimed['decision_claim_id']}")
+    data = json.loads(claim_file.read_text())
+    claim_file.write_text(json.dumps({**data, "pid": dead.pid, "start_usec": None,
+                                      "claimed_at": data["claimed_at"] - 3600}))
+
+
+for stage, expected_posts in (("before-claim", 1), ("before-post", 1), ("after-post", 2),
+                              ("after-delivered", 1)):
+    path, rid, claimed, room_req = release(f"crash-{stage}", lambda: {"event_id": "$c"})
+    crashed = []
+
+    def crashing_req(method, url, payload=None, timeout=35, _stage=stage, _room_req=room_req):
+        if url == "/v1/room" and (payload or {}).get("room_id") == SHARED and not crashed:
+            if _stage == "before-post":
+                crashed.append(True)
+                raise Crash()
+            if _stage == "after-post":
+                _room_req(method, url, payload, timeout)
+                crashed.append(True)
+                raise Crash()
+        return _room_req(method, url, payload, timeout)
+
+    real_deliver, real_commit = bridge.DeliveryCore.deliver_one, bridge._commit_publication
+    if stage == "before-claim":
+        bridge.DeliveryCore.deliver_one = lambda self, *a, **k: (_ for _ in ()).throw(Crash())
+    if stage == "after-delivered":
+        def crash_commit(*a, **k):
+            bridge._commit_publication = real_commit
+            raise Crash()
+        bridge._commit_publication = crash_commit
+    before = len(shared_posts())
+    bridge._req = crashing_req
+    try:
+        bridge._publish_review(path, claimed)
+    except Crash:
+        pass
+    finally:
+        bridge._req = fake_req
+        bridge.DeliveryCore.deliver_one, bridge._commit_publication = real_deliver, real_commit
+    if stage in ("before-post", "after-post"):
+        owner_died(path, rid, claimed)
+    run_publish(path, claimed, room_req)
+    _live, record = final_record(path)
+    check(len(shared_posts()) - before == expected_posts and record["status"] == "published",
+          f"crash {stage}: {len(shared_posts()) - before} POSTs (outbox bound {expected_posts}), "
+          f"{record['status']}")
+
+# 25. An owner decision is durable before it is reported: the record's directory is synced
+# after the rename, a sync failure is not success, and an orphan claim blocks a second one.
+bridge._STATE = root / "durable-decision"
+path, rid = new_review("task-durable-decision")
+order, real_replace, real_sync = [], os.replace, guard._fsync_directory
+
+
+def spy_replace(source, target, *a, **k):
+    real_replace(source, target, *a, **k)
+    order.append(("replace", pathlib.Path(target)))
+
+
+def spy_sync(directory):
+    order.append(("sync", pathlib.Path(directory)))
+    real_sync(directory)
+
+
+os.replace, guard._fsync_directory = spy_replace, spy_sync
+try:
+    claimed = guard.claim_withheld_decision(path, dict(YES))
+finally:
+    os.replace, guard._fsync_directory = real_replace, real_sync
+renamed = order.index(("replace", path))
+check(claimed is not None and ("sync", path.parent) in order[renamed + 1:],
+      f"the record's directory is synced after its rename: {order[-3:]}")
+bridge._STATE = root / "durable-artifact"
+order, real_link = [], os.link
+
+
+def spy_link(source, target, *a, **k):
+    real_link(source, target, *a, **k)
+    order.append(("link", pathlib.Path(target)))
+
+
+os.link, guard._fsync_directory = spy_link, spy_sync
+try:
+    guard.materialize_withheld_verdict(
+        leak, "SECRET-BODY", bridge._STATE, "task-durable-artifact",
+        {"source": "ag2space", "channel_id": SHARED, "user_id": "@team:example"},
+        "@agent:example", now=1000)
+finally:
+    os.link, guard._fsync_directory = real_link, real_sync
+artifact = guard.withheld_review_path(bridge._STATE, "task-durable-artifact")
+linked = order.index(("link", artifact))
+check(("sync", artifact.parent) in order[linked + 1:],
+      f"a new review record's directory is synced after it is linked: {order[-3:]}")
+bridge._STATE = root / "durable-artifact-fails"
+
+
+def failing_artifact_sync(directory):
+    if pathlib.Path(directory).name == guard.WITHHELD_RESULT_DIR:
+        raise OSError(5, "EIO")
+    real_sync(directory)
+
+
+guard._fsync_directory = failing_artifact_sync
+try:
+    unsaved = guard.materialize_withheld_verdict(
+        leak, "SECRET-BODY", bridge._STATE, "task-artifact-fails",
+        {"source": "ag2space", "channel_id": SHARED}, "@agent:example", now=1000)
+finally:
+    guard._fsync_directory = real_sync
+check(unsaved.body == guard.TEAM_LEAK_RESULT_UNSAVED,
+      "a review record that cannot be made durable is reported unsaved, fail-closed")
+bridge._STATE = root / "durable-decision-fails"
+path, rid = new_review("task-durable-fails")
+
+
+def failing_record_sync(directory):
+    if pathlib.Path(directory) == path.parent:
+        raise OSError(5, "EIO")
+    real_sync(directory)
+
+
+guard._fsync_directory = failing_record_sync
+try:
+    claimed = guard.claim_withheld_decision(path, dict(YES))
+finally:
+    guard._fsync_directory = real_sync
+check(claimed is None, "a decision whose rename cannot be made durable is not reported as made")
+bridge._STATE = root / "orphan-claim"
+path, rid = new_review("task-orphan-claim")
+awaiting = path.read_bytes()
+check(guard.claim_withheld_decision(path, dict(YES)) is not None, "orphan claim: Yes claimed")
+path.write_bytes(awaiting)  # power loss: the claim entry survived, the decided record did not
+before = len(shared_posts())
+check(guard.claim_withheld_decision(path, dict(NO)) is None
+      and bridge._handle_review_decision(decision("No", rid, "orphan-no")) is True
+      and len(shared_posts()) == before and json.loads(path.read_text())["status"] == "awaiting_owner",
+      "orphan claim: a later opposite reply is refused and nothing is published")
+
+# 26. A reconcile that keeps failing stops re-editing the card after a bounded number of
+# tries, and says so once.
+bridge._STATE = root / "states" / "reconcile-gives-up"
+directory = bridge._STATE / "withheld-team-results"
+(directory / "archive").mkdir(parents=True)
+(directory / "archive" / "superseded").write_text("not a directory")
+(directory / "archive" / "wr_0000000000000000.json").write_text(
+    json.dumps({**base_record, **YES, "dm_event_id": "$gives-up"}))
+(directory / "wr_0000000000000000.json").write_text(
+    json.dumps({**base_record, **NO, "dm_event_id": "$gives-up"}))
+mark, logs_before = len(calls), len(logs)
+for _beat in range(5):
+    bridge._retry_withheld_reviews()
+edits = [p for _m, u, p in calls[mark:] if u == "/v1/room" and p.get("event_id") == "$gives-up"]
+gave_up = [line for line in logs[logs_before:] if "no further card edits" in line]
+check(len(edits) == bridge._RECONCILE_GIVE_UP_AFTER and len(gave_up) == 1,
+      f"a failing reconcile is bounded: {len(edits)} card edits, {len(gave_up)} give-up line")
 bridge._STATE = root / "state"
 
 builtins.open, io.open, os.open = _real_open, _real_io_open, _real_os_open

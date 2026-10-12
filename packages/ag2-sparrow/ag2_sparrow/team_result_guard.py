@@ -452,6 +452,9 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict) -> b
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)  # success is reported only once the rename is durable
+    except OSError:
+        return False
     finally:
         try:
             os.unlink(temporary)
@@ -494,8 +497,7 @@ def actionable_records(directory: Path, field: str = "withheld_body"):
     """The live records of `directory` that may act, under the ledger lock, and the
     ones frozen instead: a record whose id is reserved to another body, or whose
     id already has an archived decision, moves to `conflicts/` for the owner and
-    never acts. A copy of the body a proven archived outcome holds is left in place
-    for the caller to reconcile. Returns (actionable [(path, record)], frozen [path])."""
+    never acts. Returns (actionable [(path, record)], frozen [path])."""
     directory = Path(directory)
     actionable, frozen = [], []
     if not directory.is_dir():
@@ -627,8 +629,11 @@ def _write_artifact(path: Path, payload: dict, field: str) -> bool:
                 os.rename(temporary, path)
             else:
                 os.link(temporary, path)
+            _fsync_directory(path.parent)
         except FileExistsError:
             pass
+        except OSError:
+            return False
         return _holds(path, field, payload[field])
     finally:
         try:
@@ -789,6 +794,8 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
         if (record is None or record.get("status") != "awaiting_owner"
                 or not _owns_its_id(path, "withheld_body")):
             return None
+        if any(_issued_claim(path, "*").parent.glob(f"{path.stem}.*")):
+            return None  # an earlier claim whose decision did not survive: never a second one
         claim_id = os.urandom(16).hex()
         ledger = _issued_claim(path, claim_id)
         ledger.parent.mkdir(mode=0o700, exist_ok=True)
@@ -811,55 +818,6 @@ def _fsync_directory(directory: Path) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
-
-
-def _atomic_text(target: Path, text: str) -> None:
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-        _fsync_directory(target.parent)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-
-
-PUBLISHED_DIR = "published"
-
-
-def record_publication(path: Path, claim_id, event_id: str, dedupe_key: str) -> None:
-    """Durable evidence, written under the ledger lock before anything else, that the
-    release POST for this claim landed; a POST is never sent again once it exists."""
-    path = Path(path)
-    with _ledger_lock(_record_directory(path)):
-        _atomic_text(_record_directory(path) / PUBLISHED_DIR / f"{path.stem}.json", json.dumps(
-            {"claim_id": claim_id, "event_id": event_id, "dedupe_key": dedupe_key,
-             "posted_at": time.time()}, sort_keys=True))
-
-
-def publication_of(path: Path, claim_id, dedupe_key: str):
-    """The landed-POST evidence for this review's active claim: None when there is none,
-    the record when it is bound to `claim_id` and `dedupe_key` with an event id, and the
-    string "invalid" for anything else, which must neither POST nor commit."""
-    path = Path(path)
-    sentinel = _record_directory(path) / PUBLISHED_DIR / f"{path.stem}.json"
-    with _ledger_lock(_record_directory(path)):
-        if not sentinel.exists():
-            return None
-        try:
-            record = json.loads(sentinel.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return "invalid"
-    bound = (isinstance(record, dict) and isinstance(claim_id, str) and claim_id
-             and record.get("claim_id") == claim_id and record.get("dedupe_key") == dedupe_key
-             and isinstance(record.get("event_id"), str) and record["event_id"])
-    return record if bound else "invalid"
 
 
 def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:

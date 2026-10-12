@@ -316,6 +316,7 @@ from .send_failure_policy import MAX_TRANSIENT_ATTEMPTS, resolve_failed_send
 from .delivery_core import (DeliveryCore, DesignAClaimBackend, DrainStatus,
                             RetryPolicy)
 from .delivery_core import DeliveryOutcome as CoreDeliveryOutcome
+from .delivery_core.provider_ag2space import AG2SpaceRoomMessageProvider
 from .delivery_core.provider_ag2space import (AG2SpaceResultProvider, RESULT_THREAD_ASK,
                                               RESULT_THREAD_FIELD)
 from .result_ready import (identity_of, read_ready_result, read_ready_result_with_identity,
@@ -977,48 +978,68 @@ def _stale_review_write(path: Path, step: str) -> None:
          f"(now {current.get('status')}); the next beat retries from it")
 
 
+_WITHHELD_OUTBOX: "DeliveryCore | None" = None
+# Outbox park reasons that mean the release was never delivered; any other park may have landed.
+_DEFINITE_PUBLISH_FAILURES = ("permanent-refusal", "max-attempts", "retry-window-exhausted")
+
+
+def _withheld_outbox() -> DeliveryCore:
+    """The outbox that publishes an owner-released body to its room, at most once."""
+    global _WITHHELD_OUTBOX
+    root = _STATE / "withheld-review-outbox"
+    if _WITHHELD_OUTBOX is None or _WITHHELD_OUTBOX.backend.root != root:
+        _WITHHELD_OUTBOX = DeliveryCore(
+            DesignAClaimBackend(root, retry_schedule=RetrySchedule(), republish_delivered=False),
+            AG2SpaceRoomMessageProvider(lambda *a, **k: _req(*a, **k)),
+            policy=RetryPolicy(max_attempts=MAX_TRANSIENT_ATTEMPTS),
+            worker="withheld-review-publication")
+    return _WITHHELD_OUTBOX
+
+
 def _publish_review(path: Path, record: dict) -> bool:
     version = team_result_guard.record_version(record)
-    if not team_result_guard.withheld_claim_publishable(path, record.get("decision_claim_id")):
+    claim = record.get("decision_claim_id")
+    if not team_result_guard.withheld_claim_publishable(path, claim):
         if str(path) not in _REFUSED_REVIEW_PUBLICATIONS:
             _REFUSED_REVIEW_PUBLICATIONS.add(str(path))
             _log(f"withheld review {path.stem}: publication refused, no matching release "
                  "claim; the body stays private until the owner acts")
         return False
-    dedupe_key = f"withheld-publish:{record['review_id']}"
-    posted = team_result_guard.publication_of(path, record.get("decision_claim_id"), dedupe_key)
-    if posted is not None:
-        # Evidence of a landed POST: never send it again. Evidence not bound to this claim
-        # neither POSTs nor commits; it stays for the owner.
-        if posted == "invalid":
-            if f"posted:{path}" not in _REFUSED_REVIEW_PUBLICATIONS:
-                _REFUSED_REVIEW_PUBLICATIONS.add(f"posted:{path}")
-                _log(f"withheld review {path.stem}: publication evidence does not match "
-                     "this claim; nothing posted or recorded")
-            return False
-        return _commit_publication(path, record, version, posted["event_id"])
     context = record.get("context") or {}
     room = str(context.get("channel_id") or "")
     body = _released_review_body(str(record.get("withheld_body") or ""))
     if not room.startswith("!") or not body:
-        record.update({"status": "publish_failed", "publish_error": "invalid origin/body",
-                       "card_resolution_pending": True})
-        if not team_result_guard.update_record(path, record, expect=version):
-            _stale_review_write(path, "publication failure")
-        return False
-    answer = _req("POST", "/v1/room", {
-        "op": "message", "room_id": room, "body": body, "dedupe_key": dedupe_key,
-    }, timeout=20)
-    if not isinstance(answer, dict) or not answer.get("ok"):
-        return False
-    event_id = str(answer.get("event_id") or "")
-    team_result_guard.record_publication(path, record.get("decision_claim_id"), event_id, dedupe_key)
-    return _commit_publication(path, record, version, event_id)
+        return _record_publish_failure(path, record, version, "invalid origin/body")
+    core, item_id = _withheld_outbox(), f"{record['review_id']}.{claim}"
+    payload = json.dumps({"room_id": room, "body": body}, sort_keys=True).encode("utf-8")
+    core.backend.publish(item_id, payload)  # once per claim; the outbox owns every retry
+    if (read_item(core.backend.root, item_id) or {}).get("status") not in core.backend.TERMINAL:
+        core.deliver_one(item_id, payload)
+    item = read_item(core.backend.root, item_id) or {}
+    if item.get("status") == "DELIVERED":
+        return _commit_publication(path, record, version,
+                                   core.provider.receipts.get(item_id, ""))
+    if item.get("status") == "PARKED":
+        if item.get("reason") in _DEFINITE_PUBLISH_FAILURES:
+            return _record_publish_failure(path, record, version, item.get("reason"))
+        if f"unknown:{item_id}" not in _REFUSED_REVIEW_PUBLICATIONS:
+            _REFUSED_REVIEW_PUBLICATIONS.add(f"unknown:{item_id}")
+            _log(f"withheld review {path.stem}: the publication may have landed but was not "
+                 f"confirmed ({item.get('reason')}); it is not sent again and stays pending")
+    return False
+
+
+def _record_publish_failure(path: Path, record: dict, version: dict, reason) -> bool:
+    record.update({"status": "publish_failed", "publish_error": str(reason),
+                   "card_resolution_pending": True})
+    if not team_result_guard.update_record(path, record, expect=version):
+        _stale_review_write(path, "publication failure")
+    return False
 
 
 def _commit_publication(path: Path, record: dict, version: dict, event_id: str) -> bool:
-    """Record a landed publication on the review, onto its newer version if the record
-    moved meanwhile. An unreadable record is read again, never answered by another POST."""
+    """Record a confirmed publication on the review, onto its newer version if the record
+    moved meanwhile; an unreadable record is read again, never answered by another POST."""
     landed = {"status": "published", "published_at": time.time(),
               "published_event_id": event_id, "card_resolution_pending": True}
     record.update(landed)
@@ -1073,6 +1094,11 @@ def _edit_review_card(record: dict) -> "dict | None":
     return answer
 
 
+_RECONCILE_FAILURES: dict = {}
+# A reconcile that keeps failing stops re-editing the card after this many tries per process.
+_RECONCILE_GIVE_UP_AFTER = 3
+
+
 def _defers_to_archive(path: Path) -> bool:
     """True when an archived decision owns this review: the live copy never acts. Only a
     proven archived outcome restores the card, then retires the copy; never raises."""
@@ -1080,6 +1106,8 @@ def _defers_to_archive(path: Path) -> bool:
         archived = team_result_guard.archived_withheld_decision(path)
         if archived is None:
             return False
+        if _RECONCILE_FAILURES.get(str(path), 0) >= _RECONCILE_GIVE_UP_AFTER:
+            return True
         outcome = team_result_guard.archived_outcome(archived)
         if (outcome is not None
                 and _edit_review_card(archived) is not None
@@ -1091,6 +1119,10 @@ def _defers_to_archive(path: Path) -> bool:
                 "its archived decision is not a recognised outcome; left for the owner")
     except Exception as exc:  # noqa: BLE001 — one record's fault must never stop the beat
         note = f"archive reconcile failed ({exc}); left for the owner"
+        failures = _RECONCILE_FAILURES[str(path)] = _RECONCILE_FAILURES.get(str(path), 0) + 1
+        if failures == _RECONCILE_GIVE_UP_AFTER:
+            _log(f"withheld review {path.stem}: archive reconcile failed {failures} times; "
+                 "no further card edits for it until the bridge restarts")
     if f"archived:{path}" not in _REFUSED_REVIEW_PUBLICATIONS:
         _REFUSED_REVIEW_PUBLICATIONS.add(f"archived:{path}")
         _log(f"withheld review {path.stem}: live copy left untouched; {note}")

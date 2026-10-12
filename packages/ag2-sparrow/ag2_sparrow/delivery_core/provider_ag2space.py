@@ -9,6 +9,8 @@ import json
 import urllib.error
 from typing import Callable, Optional
 
+from ..outbox import DeliveryOutcome as OutboxOutcome
+from ..outbox_adapter import classify_response
 from ..send_failure_policy import is_retryable_http_status
 
 from .contract import (DeliveryAttempt, DeliveryOutcome, DeliveryReceipt,
@@ -66,4 +68,50 @@ class AG2SpaceResultProvider:
     def reconcile(self, attempt: DeliveryAttempt) -> Optional[DeliveryReceipt]:
         # Declines to answer: the gateway exposes no read-back, so ambiguity is
         # resolved by this provider's idempotent re-send, not by reconciliation.
+        return None
+
+
+ROOM_PATH = "/v1/room"
+
+
+class AG2SpaceRoomMessageProvider:
+    """Posts one message to an AG2 Space room. Only an event id proves delivery: an
+    accepted response without one may have landed, so it is never re-sent."""
+
+    capabilities = ProviderCapabilities(reconcile_capable=False, idempotent_send=False)
+
+    def __init__(self, request: Callable[..., dict]):
+        self._request = request
+        self.receipts: dict = {}
+
+    def deliver(self, item_id: str, payload: bytes,
+                idempotency_key: str) -> DeliveryReceipt:
+        try:
+            message = json.loads(payload.decode("utf-8"))
+            room, body = message["room_id"], message["body"]
+        except (UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
+            raise ProviderPermanentRefused(f"malformed room message for {item_id}: {e}") from e
+        try:
+            resp = self._request("POST", ROOM_PATH, {
+                "op": "message", "room_id": room, "body": body,
+                "dedupe_key": idempotency_key}, timeout=20)
+        except urllib.error.HTTPError as e:
+            if 500 <= e.code <= 599:
+                raise ProviderIndeterminate(f"gateway error for {item_id}: HTTP {e.code}") from e
+            if is_retryable_http_status(e.code, auth_recoverable=True):
+                raise ProviderRefused(f"gateway refused {item_id} for now: HTTP {e.code}") from e
+            raise ProviderPermanentRefused(f"gateway refused {item_id}: HTTP {e.code}") from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise ProviderIndeterminate(f"transport failure for {item_id}: {e}") from e
+        receipt = classify_response(200, resp, id_keys=("event_id",))
+        if receipt.outcome is OutboxOutcome.CONFIRMED:
+            self.receipts[item_id] = receipt.receipt_id
+            return DeliveryReceipt(outcome=DeliveryOutcome.CONFIRMED, provider_ref=receipt.receipt_id,
+                                   destination=room, detail=receipt.detail)
+        if isinstance(resp, dict) and (resp.get("ok") is False or resp.get("error")
+                                       or resp.get("errcode")):
+            raise ProviderPermanentRefused(f"gateway declined {item_id}: {str(resp)[:200]}")
+        raise ProviderIndeterminate(f"accepted without an event id for {item_id}")
+
+    def reconcile(self, attempt: DeliveryAttempt) -> Optional[DeliveryReceipt]:
         return None
