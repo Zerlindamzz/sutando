@@ -170,6 +170,24 @@ describe('relay agent: a work call waits until the user has finished speaking', 
 		void second;
 	});
 
+	it('a request made after the model answered the last one is a new task, whatever the microphone picked up', async () => {
+		// 2026-10-11 23:42: four requests in a row, each answered with "Working on it"; between them the
+		// microphone picked up sounds too short to be speech (a start with no end). All four were merged.
+		const { relay, speech, submitted } = agent();
+		for (const task of ['merged PRs this week', 'check PR 5302', 'check PR 5229', 'check PR 5167']) {
+			speech.onUserSpeechStarted();
+			speech.onUserSpeechEnded();
+			void relay.invoke('w', { task });
+			await tick(10);
+			speech.onModelAudio(); // "Working on it"
+			await tick(20);
+			speech.onUserSpeechStarted(); // a sound too short to be speech: no end follows
+			await tick(10);
+		}
+		await tick(50);
+		assert.deepEqual(submitted.map((a) => a.task), ['merged PRs this week', 'check PR 5302', 'check PR 5229', 'check PR 5167']);
+	});
+
 	it('a request the user has finished is submitted once they have been quiet a moment', async () => {
 		const { relay, speech, submitted } = agent();
 		speech.onUserSpeechStarted();

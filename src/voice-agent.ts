@@ -1382,6 +1382,7 @@ async function main() {
 	let lastUserSpeechAt: number | undefined;
 	session.eventBus.subscribe('speech.user_started', () => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechStarted(); });
 	session.eventBus.subscribe('speech.user_ended', () => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechEnded(); });
+	session.eventBus.subscribe('response.first_audio', () => speechGate.onModelAudio());
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const speechHost = session as any;
 	setVoiceTurnsProvider(() => ({

@@ -227,14 +227,18 @@ export const QUIET_BEFORE_SUBMIT_MS = 1_500;
 export const MAX_SUBMIT_HOLD_MS = 30_000;
 
 /**
- * Whether the user has finished speaking. The model can end the user's turn mid-sentence (a short
- * pause) and call `work` with half a request; the relay agent waits on this before it submits.
+ * Whether the user has finished their turn. The model can end the user's turn mid-sentence (a short
+ * pause) and call `work` with half a request; the relay agent waits on this before it submits. The
+ * turn is over once the user has been quiet a moment, or once the model has spoken to them: what the
+ * user says after the model's reply is a new request, never the rest of this one.
  */
 export interface SpeechGate {
 	onUserSpeechStarted(): void;
 	onUserSpeechEnded(): void;
-	/** Resolves once the user has been quiet for the quiet time, or the hold limit or `signal` ends the wait. */
-	waitQuiet(signal?: AbortSignal): Promise<void>;
+	/** The model started speaking to the user. */
+	onModelAudio(): void;
+	/** Resolves once the user's turn is over, or the hold limit or `signal` ends the wait. */
+	waitTurnOver(signal?: AbortSignal): Promise<void>;
 }
 
 export function createSpeechGate(opts: { quietMs?: number; maxHoldMs?: number; now?: () => number } = {}): SpeechGate {
@@ -242,20 +246,35 @@ export function createSpeechGate(opts: { quietMs?: number; maxHoldMs?: number; n
 	const quietMs = opts.quietMs ?? QUIET_BEFORE_SUBMIT_MS;
 	const maxHoldMs = opts.maxHoldMs ?? MAX_SUBMIT_HOLD_MS;
 	let speaking = false;
+	let startedAt = 0;
 	let endedAt: number | null = null;
+	let modelAudioAt: number | null = null;
+	// Every wait looks again on each event, so the model's first word releases a call at once.
+	const waits = new Set<() => void>();
+	const wake = () => { for (const look of [...waits]) look(); };
 	return {
-		onUserSpeechStarted() { speaking = true; },
-		onUserSpeechEnded() { speaking = false; endedAt = now(); },
-		waitQuiet(signal) {
+		onUserSpeechStarted() { speaking = true; startedAt = now(); wake(); },
+		onUserSpeechEnded() { speaking = false; endedAt = now(); wake(); },
+		onModelAudio() { modelAudioAt = now(); wake(); },
+		waitTurnOver(signal) {
 			const since = now();
 			return new Promise<void>((resolve) => {
-				const look = () => {
+				let timer: ReturnType<typeof setTimeout> | null = null;
+				const done = () => { waits.delete(look); if (timer) clearTimeout(timer); resolve(); };
+				function look() {
 					const t = now();
-					if (signal?.aborted || t - since >= maxHoldMs) return resolve();
-					const quietFrom = speaking ? null : (endedAt ?? 0) + quietMs;
-					if (quietFrom !== null && t >= quietFrom) return resolve();
-					setTimeout(look, quietFrom === null ? 100 : Math.max(10, quietFrom - t));
-				};
+					if (signal?.aborted || t - since >= maxHoldMs) return done();
+					// The model answered: the user's turn is over, whatever the microphone picks up now.
+					if (modelAudioAt !== null && modelAudioAt >= since) return done();
+					// A speech start with no end (a sound too short to be speech) does not hold the call for good.
+					const stillSpeaking = speaking && t - startedAt < maxHoldMs;
+					const quietFrom = stillSpeaking ? null : (endedAt ?? 0) + quietMs;
+					if (quietFrom !== null && t >= quietFrom) return done();
+					if (timer) clearTimeout(timer);
+					timer = setTimeout(look, quietFrom === null ? Math.max(10, since + maxHoldMs - t) : Math.max(10, quietFrom - t));
+				}
+				waits.add(look);
+				signal?.addEventListener('abort', look, { once: true });
 				look();
 			});
 		},
@@ -442,8 +461,9 @@ export class RelayAgent implements PersistentSubagentInstance {
 
 	async invoke(_task: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
 		if (this.deps.speech) {
-			// A call made while an earlier one still waits for the user to finish: the user went on
-			// speaking, so the two are one request. The earlier call ends; this one carries both.
+			// A call made while an earlier one still waits for the user's turn to end: the model has not
+			// answered in between, the user went on speaking, so the two are one request. The earlier
+			// call ends; this one carries both.
 			const earlier = this.holding;
 			if (earlier) {
 				earlier.joined = true;
@@ -456,7 +476,7 @@ export class RelayAgent implements PersistentSubagentInstance {
 			}
 			const mine = { args, joined: false };
 			this.holding = mine;
-			await this.deps.speech.waitQuiet(signal);
+			await this.deps.speech.waitTurnOver(signal);
 			if (mine.joined) return framedSystem(ENDED.continued_in_next);
 			if (this.holding === mine) this.holding = null;
 		}
