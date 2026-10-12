@@ -1056,21 +1056,28 @@ def _resolve_review_card(path: Path, record: dict) -> bool:
                    "card_resolution_event_id": str(answer.get("event_id") or "")})
     if not team_result_guard.update_record(path, record, expect=version):
         _stale_review_write(path, "card resolution")
-        _reshow_current_card(path)
+        try:
+            if not _reshow_current_card(path):
+                _log(f"withheld review {path.stem} card edit still pending")
+        except Exception as exc:  # noqa: BLE001 — the owed marker retries it
+            _log(f"withheld review {path.stem} card edit retry failed: {exc}")
         return False
     _archive_resolved_review(path, record)
     return True
 
 
-def _reshow_current_card(path: Path) -> None:
+def _reshow_current_card(path: Path) -> bool:
     """A stale card edit may land after the edit for a newer state; show the current
-    one again. A live record still pending its card is left to the retry beat."""
+    one again. The card stays owed, and is retried every beat, until an edit lands."""
+    team_result_guard.mark_card_owed(path)
     archived = path.parent / "archive" / path.name
     current = _read_private_json(archived if archived.is_file() else path)
-    if not current or (not archived.is_file() and current.get("card_resolution_pending")):
-        return
-    if _edit_review_card(current) is None:
-        _log(f"withheld review {path.stem}: card may show a superseded state; edit failed")
+    # A live record still pending its card is the live retry's to edit.
+    if current and (archived.is_file() or not current.get("card_resolution_pending")):
+        if _edit_review_card(current) is None:
+            return False
+    team_result_guard.clear_card_owed(path)
+    return True
 
 
 def _handle_hitl_action(task: dict):
@@ -1163,6 +1170,7 @@ def _retry_withheld_reviews() -> None:
     """One poll beat's durable review retries, in order."""
     _retry_pending_publications()
     _retry_review_card_resolutions()
+    _retry_owed_review_cards()
     _retry_review_control_results()
 
 
@@ -1189,6 +1197,19 @@ def _retry_review_card_resolutions() -> None:
                 _log(f"withheld review {record.get('review_id')} card edit still pending")
         except Exception as exc:  # noqa: BLE001 — next poll retries
             _log(f"withheld review {record.get('review_id')} card edit retry failed: {exc}")
+
+
+def _retry_owed_review_cards() -> None:
+    try:
+        owed = team_result_guard.card_owed_reviews(_STATE / team_result_guard.WITHHELD_RESULT_DIR)
+    except OSError:
+        return
+    for path in owed:
+        try:
+            if not _reshow_current_card(path):
+                _log(f"withheld review {path.stem} card edit still pending")
+        except Exception as exc:  # noqa: BLE001 — next poll retries
+            _log(f"withheld review {path.stem} card edit retry failed: {exc}")
 
 
 def _control_result_path(task_id: str) -> Path:

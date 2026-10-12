@@ -648,6 +648,41 @@ check(stage.get("published") is True and stage.get("b_resolved") is True and res
 check(len(edits) == 3 and "Published to the original room" in edits[-1],
       f"stale card: the last card edit shows the archived outcome, not pending: {edits}")
 
+# 11c. The re-show edit fails: the card stays owed across failing beats, then the first
+# beat whose edit lands shows the archived outcome and clears the marker.
+bridge._STATE = root / "cas-card-owed"
+path, rid = new_review("task-cas-owed")
+snapshot = dict(guard.claim_withheld_decision(path, dict(NO)))
+
+
+def owed_race_edit(stale):
+    bridge._edit_review_card = real_edit
+    fresh = json.loads(path.read_text())
+    bridge._publish_review(path, fresh)
+    bridge._resolve_review_card(path, fresh)
+    landed = real_edit(stale)
+    fail_edits[0] = "reject"
+    return landed
+
+
+bridge._edit_review_card = owed_race_edit
+try:
+    bridge._resolve_review_card(path, snapshot)
+    owed = path.parent / guard.CARD_OWED_DIR / path.stem
+    check(owed.is_file() and not path.exists(), "owed card: a failed re-show leaves the card owed")
+    bridge._retry_withheld_reviews()
+    check(owed.is_file() and any(path.stem in line and "card edit still pending" in line
+                                 for line in logs),
+          "owed card: a beat whose edit fails keeps the marker and logs like the live path")
+finally:
+    bridge._edit_review_card = real_edit
+    fail_edits[0] = False
+mark = len(calls)
+bridge._retry_withheld_reviews()
+edits = card_edits_since(mark)
+check(not owed.exists() and len(edits) == 1 and "Published to the original room" in edits[0],
+      f"owed card: the next beat shows the archived outcome and clears the marker: {edits}")
+
 # 12. A proven archive beside a same-body copy whose id is reserved to another body is
 # not proven: zero card edits, and the copy is frozen in conflicts/.
 bridge._STATE = root / "reserved-other"

@@ -485,7 +485,7 @@ def test_the_production_loop_calls_both_relays():
     retries = [n.func.id for n in ast.walk(beat)
                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
     assert retries == ["_retry_pending_publications", "_retry_review_card_resolutions",
-                       "_retry_review_control_results"], retries
+                       "_retry_owed_review_cards", "_retry_review_control_results"], retries
     lines = {}
     for n in ast.walk(main_fn):
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in watched:

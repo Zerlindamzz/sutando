@@ -797,6 +797,35 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
         return record if _write_owned_record(path, record, "withheld_body", expect) else None
 
 
+CARD_OWED_DIR = "card-owed"
+
+
+def mark_card_owed(path: Path) -> None:
+    """Record, durably and under the ledger lock, that this review's card may show a
+    superseded state and must be edited again from its current record."""
+    path = Path(path)
+    directory = _record_directory(path)
+    with _ledger_lock(directory):
+        owed = directory / CARD_OWED_DIR
+        owed.mkdir(mode=0o700, exist_ok=True)
+        os.close(os.open(owed / path.stem, os.O_CREAT | os.O_WRONLY, 0o600))
+
+
+def card_owed_reviews(directory: Path) -> list:
+    """The review paths whose card is owed an edit, as their live path names them."""
+    directory = Path(directory)
+    with _ledger_lock(directory):
+        owed = directory / CARD_OWED_DIR
+        return [directory / f"{m.name}.json" for m in sorted(owed.iterdir())] if owed.is_dir() else []
+
+
+def clear_card_owed(path: Path) -> None:
+    path = Path(path)
+    directory = _record_directory(path)
+    with _ledger_lock(directory):
+        (directory / CARD_OWED_DIR / path.stem).unlink(missing_ok=True)
+
+
 def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:
     return Path(state_dir) / SUPPRESSED_RESULT_DIR / f"{withheld_review_id(task_id, body_digest)}.json"
 
