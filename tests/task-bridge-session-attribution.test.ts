@@ -17,7 +17,7 @@ mkdirSync(join(workspace, 'logs'), { recursive: true });
 
 const {
 	workTool, setVoiceSessionOrigin, setVoiceTurnsProvider, voiceTaskOrigin,
-	forwardOfflineVoiceResult, logSessionBoundary, endVoiceClientSession,
+	forwardOfflineVoiceResult, logSessionBoundary, logSessionBoundaryAsync, endVoiceClientSession,
 } = await import('../src/task-bridge.js');
 
 afterEach(() => {
@@ -95,7 +95,7 @@ describe('a voice task retains the context that invoked it', () => {
 		await assertOrigin(taskId, 'room-A');
 		assert.equal(verifiedA, 1);
 		assert.equal(verifiedB, 0);
-		assert.match(taskBody(taskId), /original room context/);
+		assert.match(taskBody(taskId), /--- earlier in this voice conversation[\s\S]*assistant: Previous turn\./);
 		assert.doesNotMatch(taskBody(taskId), /private speech|private next-room|--- spoken/);
 		assert.equal(speech.reads, readsBeforeSwitch, 'a reused provider is not read after the room changes');
 	});
@@ -184,6 +184,7 @@ describe('a voice task retains the context that invoked it', () => {
 		const pending = delegate('research the venue options');
 		await speech.read;
 		logSessionBoundary('voice_goodbye');
+		await logSessionBoundaryAsync('voice_goodbye');
 		speech.setInput('research the venue options, bye');
 		const { taskId } = await pending;
 		await assertOrigin(taskId, 'session-room');
@@ -194,7 +195,7 @@ describe('a voice task retains the context that invoked it', () => {
 		setVoiceTurnsProvider(late.provider);
 		const next = delegate('work asked just before the client closes');
 		await late.read;
-		logSessionBoundary('voice_goodbye');
+		await logSessionBoundaryAsync('voice_goodbye');
 		endVoiceClientSession();
 		late.setInput('words after the client left');
 		const closed = await next;
