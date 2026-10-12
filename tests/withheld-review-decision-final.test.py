@@ -2410,6 +2410,31 @@ def directory_swapped_after_check():
 
 
 rule["directory-swap-before-open"] = directory_swapped_after_check()
+
+def move_refuses_linked_source():
+    namespace = scratch / "moves" / guard.WITHHELD_RESULT_DIR
+    namespace.mkdir(parents=True)
+    (scratch / "moves" / "outside.json").write_text("{}")
+    (namespace / "wr_2.json").symlink_to(scratch / "moves" / "outside.json")
+    refused = raises_unknown(lambda: guard._durable_move(namespace / "wr_2.json",
+                                                         namespace / "archive" / "wr_2.json"))
+    return refused and (namespace / "wr_2.json").is_symlink() and not (namespace / "archive").exists()
+
+
+def first_review_under_linked_namespace():
+    state, outside = scratch / "first-review", scratch / "first-review-outside"
+    state.mkdir()
+    outside.mkdir(mode=0o755)
+    (state / guard.WITHHELD_RESULT_DIR).symlink_to(outside)
+    verdict = guard.materialize_withheld_verdict(
+        leak, "SECRET-BODY", state, "task-first-review", {"source": "ag2space",
+        "channel_id": SHARED, "user_id": "@team:example"}, "@agent:example", now=1000)
+    return (verdict.body == guard.TEAM_LEAK_RESULT_UNSAVED and not any(outside.iterdir())
+            and outside.stat().st_mode & 0o777 == 0o755)
+
+
+rule["move-refuses-linked-source"] = move_refuses_linked_source()
+rule["first-review-under-linked-namespace"] = first_review_under_linked_namespace()
 bridge._STATE = scratch
 review_link = scratch / "linked-review.json"
 review_link.symlink_to("dir/inner")

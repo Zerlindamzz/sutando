@@ -1,0 +1,101 @@
+{
+ "tests": [
+  "tests/withheld-review-decision-final.test.py",
+  "tests/health-check-outbox-parked.test.py",
+  "tests/team-result-guard.test.py",
+  "tests/withheld-review-dm.test.py",
+  "tests/gateway-disposal-delegation.test.py"
+ ],
+ "mutants": [
+  {
+   "name": "the folder helper skips the strict walk",
+   "file": "src/policy/egress/result.py",
+   "old": "    if not present(directory, stat.S_IFDIR):\n        directory.mkdir(mode=0o700, parents=True, exist_ok=True)\n        if not present(directory, stat.S_IFDIR):\n            raise FileNotFoundError(2, \"No such file or directory\", str(directory))\n    return directory",
+   "new": "    directory.mkdir(mode=0o700, parents=True, exist_ok=True)\n    return directory"
+  },
+  {
+   "name": "a move accepts a linked source",
+   "file": "src/policy/egress/result.py",
+   "old": "    if not present(source, stat.S_IFREG):                # a real file, reached through no link\n        raise FileNotFoundError(2, \"No such file or directory\", str(source))\n",
+   "new": ""
+  },
+  {
+   "name": "a move writes through an unverified target folder",
+   "file": "src/policy/egress/result.py",
+   "old": "    _ensure_dir(target.parent)\n    os.link(source, target)",
+   "new": "    os.link(source, target)"
+  },
+  {
+   "name": "a new review folder is created through a link",
+   "file": "src/policy/egress/result.py",
+   "old": "        os.chmod(_ensure_dir(directory), 0o700)\n    except OSError:\n        return TeamResultVerdict(VERDICT_LEAK",
+   "new": "        directory.mkdir(parents=True, exist_ok=True)\n        os.chmod(directory, 0o700)\n    except OSError:\n        return TeamResultVerdict(VERDICT_LEAK"
+  },
+  {
+   "name": "the reply does not use the shared preflight",
+   "file": "packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py",
+   "old": "        problems = team_result_guard.namespace_problems(directory)",
+   "new": "        problems = []"
+  },
+  {
+   "name": "the preflight skips archive/superseded/",
+   "file": "src/policy/egress/result.py",
+   "old": "                            (directory / \"archive\" / \"superseded\", True),\n",
+   "new": ""
+  },
+  {
+   "name": "the preflight skips claims/",
+   "file": "src/policy/egress/result.py",
+   "old": "(directory / \"conflicts\", True), (directory / \"claims\", False),",
+   "new": "(directory / \"conflicts\", True),"
+  },
+  {
+   "name": "the preflight skips issued/",
+   "file": "src/policy/egress/result.py",
+   "old": "                            (directory / \"issued\", False)):",
+   "new": "                            ):"
+  },
+  {
+   "name": "the preflight does not check claims/ and issued/ entries",
+   "file": "src/policy/egress/result.py",
+   "old": "                if not records:\n                    present(path)\n                elif",
+   "new": "                if not records:\n                    pass\n                elif"
+  },
+  {
+   "name": "the preflight accepts a non-object",
+   "file": "src/policy/egress/result.py",
+   "old": "                elif not isinstance(read_json_strict(path), dict):",
+   "new": "                elif read_json_strict(path) is None:"
+  },
+  {
+   "name": "the preflight reads through links",
+   "file": "src/policy/egress/result.py",
+   "old": "                elif not isinstance(read_json_strict(path), dict):",
+   "new": "                elif not isinstance(json.loads(Path(path).read_text(encoding=\"utf-8\")), dict):"
+  },
+  {
+   "name": "the health check scans on its own",
+   "file": "src/health-check.py",
+   "old": "    for path, reason in guard.namespace_problems(base):",
+   "new": "    for path, reason in []:"
+  },
+  {
+   "name": "the read opens only the leaf no-follow",
+   "file": "src/policy/egress/result.py",
+   "old": "    if not hasattr(os, \"O_DIRECTORY\"):  # no dir_fd walk on this platform: the leaf alone",
+   "new": "    if True:"
+  },
+  {
+   "name": "a directory step of the read follows links",
+   "file": "src/policy/egress/result.py",
+   "old": "            step = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=fd)",
+   "new": "            step = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)"
+  },
+  {
+   "name": "the read's namespace root follows a link",
+   "file": "src/policy/egress/result.py",
+   "old": "    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)",
+   "new": "    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)"
+  }
+ ]
+}
