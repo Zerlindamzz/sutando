@@ -2387,20 +2387,23 @@ def swapped_after_check(target):
 rule["swap-before-open"] = swapped_after_check(scratch / "swap")
 
 
-def directory_swapped_after_check():
-    """A directory on the way becomes a link between the walk and the open: refused too."""
-    namespace = scratch / guard.WITHHELD_RESULT_DIR
+def directory_swapped_after_check(which):
+    """A directory on the way (or the namespace root) becomes a link between the walk and the open."""
+    base = scratch / f"swap-{which}"
+    namespace = base / guard.WITHHELD_RESULT_DIR
     (namespace / "archive").mkdir(parents=True)
     (namespace / "archive" / "wr_1.json").write_text("{}")
-    (scratch / "decoy").mkdir()
-    (scratch / "decoy" / "wr_1.json").write_text("{}")
+    (base / "decoy" / "archive").mkdir(parents=True)
+    (base / "decoy" / "archive" / "wr_1.json").write_text("{}")
     target, real_present = namespace / "archive" / "wr_1.json", guard.present
+    swapped = namespace / "archive" if which == "step" else namespace
+    decoy = base / "decoy" / "archive" if which == "step" else base / "decoy"
 
     def checked_then_swapped(path, kind=None):
         answer = real_present(path, kind)
         if pathlib.Path(path) == target:
-            (namespace / "archive").rename(namespace / "archive-moved")
-            (namespace / "archive").symlink_to(scratch / "decoy")
+            swapped.rename(swapped.with_name(swapped.name + "-moved"))
+            swapped.symlink_to(decoy)
         return answer
     guard.present = checked_then_swapped
     try:
@@ -2409,7 +2412,8 @@ def directory_swapped_after_check():
         guard.present = real_present
 
 
-rule["directory-swap-before-open"] = directory_swapped_after_check()
+rule["directory-swap-before-open"] = directory_swapped_after_check("step")
+rule["root-swap-before-open"] = directory_swapped_after_check("root")
 
 def move_refuses_linked_source():
     namespace = scratch / "moves" / guard.WITHHELD_RESULT_DIR
