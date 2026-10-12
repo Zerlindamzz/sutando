@@ -407,8 +407,17 @@ def _record_directory(path: Path) -> Path:
 def _owns_its_id(path: Path, field: str) -> bool:
     """A live record may act only while its id is reserved to the body it holds
     and no decision for that id is archived; an archived decision is immutable."""
-    return (path.parent.name != "archive" and not _archived(path).exists()
+    return (path.parent.name != "archive" and not _present(_archived(path))
             and _issued_to(path, field) == _record_digest(path, field))
+
+
+def _present(path: Path) -> bool:
+    """exists() reads an unreadable directory as absent; here that raises instead."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 _VERSION_KEYS = ("status", "decision_claim_id", "generation")

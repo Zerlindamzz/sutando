@@ -1740,6 +1740,193 @@ check(shlex.split(command) == ["python3", "src/outbox_cli.py", "--root",
                                "/Users/x/Library/Application Support/ws/results/.outbox-withheld-review",
                                "requeue", "wr_1.c"], f"the recovery command is quoted: {command}")
 
+# 25m. A stale live copy never hides the archived receipt: with the card edit refused (so the
+# copy stays) and the claim owner dead past the window, the item still settles DELIVERED.
+path, rid, claimed, room_req = release("archive-wins", lambda: {"event_id": "$archive-wins"})
+stale = path.read_bytes()
+provider = bridge._withheld_outbox().provider
+real_record = provider._record_receipt
+
+
+def receipt_then_crash(*a, _real=real_record):
+    _real(*a)
+    raise Crash()
+
+
+provider._record_receipt = receipt_then_crash
+before = len(shared_posts())
+bridge._req = room_req
+try:
+    bridge._publish_review(path, claimed)
+except Crash:
+    pass
+finally:
+    bridge._req = fake_req
+    provider._record_receipt = real_record
+run_publish(path, claimed, room_req)
+bridge._retry_withheld_reviews()
+archived_first = outbox_item(path, rid, claimed).get("status")
+path.write_bytes(stale)
+owner_died(path, rid, claimed)
+bridge._req = refused_edit
+try:
+    bridge._retry_withheld_reviews()
+finally:
+    bridge._req = fake_req
+_archived = json.loads((path.parent / "archive" / path.name).read_text())
+check(archived_first != "DELIVERED" and path.exists() and _archived["status"] == "published"
+      and outbox_item(path, rid, claimed).get("status") == "DELIVERED"
+      and len(shared_posts()) - before == 1,
+      f"the archived receipt settles despite a live copy: "
+      f"{archived_first} -> {outbox_item(path, rid, claimed).get('status')}, "
+      f"{len(shared_posts()) - before} POST(s)")
+
+# 25n. An unreadable archived record fails closed: the item is not settled from the live copy.
+path, rid, claimed, room_req = release("archive-unreadable", lambda: {"event_id": "$unreadable"})
+provider._record_receipt = receipt_then_crash
+bridge._req = room_req
+try:
+    bridge._publish_review(path, claimed)
+except Crash:
+    pass
+finally:
+    bridge._req = fake_req
+    provider._record_receipt = real_record
+archived = path.parent / "archive" / path.name
+archived.parent.mkdir(parents=True, exist_ok=True)
+archived.write_text(path.read_text())
+owner_died(path, rid, claimed)
+os.chmod(archived, 0)
+try:
+    bridge._settle_landed_releases()
+    unreadable_status = outbox_item(path, rid, claimed).get("status")
+finally:
+    os.chmod(archived, 0o600)
+bridge._settle_landed_releases()
+check(unreadable_status != "DELIVERED"
+      and outbox_item(path, rid, claimed).get("status") == "DELIVERED",
+      f"an unreadable archive is never outranked by its live copy ({unreadable_status})")
+
+# 25o. Settlement drives the outbox only through claim and complete: no POST, no other call.
+path, rid, claimed, room_req = release("settle-only", lambda: {"event_id": "$settle-only"})
+provider._record_receipt = receipt_then_crash
+bridge._req = room_req
+try:
+    bridge._publish_review(path, claimed)
+except Crash:
+    pass
+finally:
+    bridge._req = fake_req
+    provider._record_receipt = real_record
+owner_died(path, rid, claimed)
+
+
+class BackendSpy:
+    def __init__(self, real):
+        self._real, self.used = real, []
+
+    def __getattr__(self, name):
+        value = getattr(self._real, name)
+        if callable(value):
+            self.used.append(name)
+        return value
+
+
+def no_network(*args, **kwargs):
+    raise AssertionError(("settlement reached the network", args))
+
+
+core = bridge._withheld_outbox()
+spy, real_backend, real_requeue = BackendSpy(core.backend), core.backend, bridge.requeue_item_with_epoch
+requeued = []
+core.backend, bridge._req = spy, no_network
+bridge.requeue_item_with_epoch = lambda *a, **k: requeued.append(a)
+try:
+    bridge._settle_landed_releases()
+finally:
+    core.backend, bridge._req, bridge.requeue_item_with_epoch = real_backend, fake_req, real_requeue
+check(set(spy.used) == {"claim", "complete"} and not requeued
+      and outbox_item(path, rid, claimed).get("status") == "DELIVERED",
+      f"settlement uses only claim and complete: {sorted(set(spy.used))}, requeue {len(requeued)}")
+
+def control_body(task_id):
+    answer_file = bridge._control_result_path(task_id)
+    return json.loads(answer_file.read_text())["body"] if answer_file.is_file() else ""
+
+
+# 25p. A reply the reviews cannot be inspected for (lock, issued/ or archive unreadable before
+# the match) is consumed and answered, never written as ordinary work; then the next applies.
+for label, target in (("first-lock", "issued/.lock"), ("issued-dir", "issued"),
+                      ("archive-dir", "archive")):
+    bridge._STATE = root / f"unreadable-{label}"
+    path, rid = new_review(f"task-unreadable-{label}")
+    broken = path.parent / target
+    broken.mkdir(exist_ok=True) if target == "archive" else None
+    mode = broken.stat().st_mode & 0o777
+    before = len(shared_posts())
+    os.chmod(broken, 0)
+    try:
+        raised, handled = None, None
+        handled = bridge._handle_review_decision(decision("No", rid, f"unreadable-{label}-1"))
+    except Exception as exc:  # noqa: BLE001
+        raised = exc
+    finally:
+        os.chmod(broken, mode)
+    answer = control_body(f"unreadable-{label}-1")
+    unchanged = path.is_file() and json.loads(path.read_text())["status"] == "awaiting_owner"
+    bridge._handle_review_decision(decision("No", rid, f"unreadable-{label}-2"))
+    _live, record = final_record(path)
+    check(raised is None and handled is True and answer and "please reply again" in answer
+          and unchanged and record["status"] == "published" and len(shared_posts()) - before == 1,
+          f"{label} unreadable before the match: consumed and answered, then the next reply "
+          f"applies (raised={raised!r}, handled={handled}, {record['status']})")
+
+# A later reply to an archived review, with the archive (or its record) unreadable, is
+# consumed and answered too; once readable, the archived outcome answers it.
+for label in ("archive-only-dir", "archive-only-record"):
+    bridge._STATE = root / f"unreadable-{label}"
+    path, rid = new_review(f"task-unreadable-{label}")
+    bridge._handle_review_decision(decision("Yes", rid, f"{label}-decide"))
+    bridge._retry_withheld_reviews()
+    archived = path.parent / "archive" / path.name
+    broken = archived.parent if label == "archive-only-dir" else archived
+    os.chmod(broken, 0)
+    try:
+        raised, handled = None, None
+        handled = bridge._handle_review_decision(decision("No", rid, f"{label}-1"))
+    except Exception as exc:  # noqa: BLE001
+        raised = exc
+    finally:
+        os.chmod(broken, 0o700 if broken.is_dir() else 0o600)
+    answer = control_body(f"{label}-1")
+    bridge._handle_review_decision(decision("No", rid, f"{label}-2"))
+    later = control_body(f"{label}-2")
+    check(not path.exists() and raised is None and handled is True
+          and "please reply again" in answer and "please reply again" not in later
+          and json.loads(archived.read_text())["status"] == "kept_private",
+          f"{label} unreadable: the reply is answered, never ordinary work ({raised!r}, {handled})")
+
+# 25q. An answer that cannot be saved is logged and the beat goes on; the reply stays unacked.
+bridge._STATE = root / "unwritable-answer"
+path, rid = new_review("task-unwritable-answer")
+lock_file = path.parent / "issued" / ".lock"
+real_control_dir = bridge._WITHHELD_CONTROL_DIR
+bridge._WITHHELD_CONTROL_DIR = path.parent / "not-a-directory"
+bridge._WITHHELD_CONTROL_DIR.write_text("")
+logs_before = len(logs)
+os.chmod(lock_file, 0)
+try:
+    raised, handled = None, None
+    handled = bridge._handle_review_decision(decision("No", rid, "unwritable-answer"))
+except Exception as exc:  # noqa: BLE001
+    raised = exc
+finally:
+    os.chmod(lock_file, 0o600)
+    bridge._WITHHELD_CONTROL_DIR = real_control_dir
+check(raised is None and handled is True
+      and any("unwritable-answer not saved" in line for line in logs[logs_before:]),
+      f"an unsaved answer is logged, never raised (raised={raised!r}, handled={handled})")
+
 # 26. A reconcile that keeps failing stops re-editing the card after a bounded number of
 # tries, and says so once.
 bridge._STATE = root / "states" / "reconcile-gives-up"

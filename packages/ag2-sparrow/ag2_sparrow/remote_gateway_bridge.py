@@ -872,11 +872,15 @@ _REVIEW_DECISION_RE = re.compile(
     r"^(yes|no)(?:\s+(wr_[0-9a-f]{16}))?[.!]?$", re.IGNORECASE)
 
 
-def _pending_review_records() -> list[tuple[Path, dict]]:
+class _ReviewsUnreadable(Exception):
+    """The reviews could not be inspected, which is not the same as no review matching."""
+
+
+def _pending_review_records(strict: bool = False) -> list[tuple[Path, dict]]:
     """Live reviews that own their id; the guard freezes any that conflict with
     their id's reservation or archived decision, and the owner is told."""
     directory = _STATE / team_result_guard.WITHHELD_RESULT_DIR
-    for path in sorted(directory.glob("wr_*.json")) if directory.is_dir() else []:
+    for path in _review_paths(directory, strict):
         try:
             if team_result_guard.proven_superseded_record(path):
                 _defers_to_archive(path)
@@ -884,7 +888,9 @@ def _pending_review_records() -> list[tuple[Path, dict]]:
             continue
     try:
         actionable, frozen = team_result_guard.actionable_records(directory)
-    except OSError:
+    except OSError as exc:
+        if strict:
+            raise _ReviewsUnreadable(exc) from exc
         return []
     for path in frozen:
         _log(f"withheld review {path.name}: conflicts with its id's decision or reservation; "
@@ -922,6 +928,18 @@ def _decision_text(task: dict) -> str:
     return text.strip()
 
 
+def _review_paths(directory: Path, strict: bool) -> list[Path]:
+    try:
+        return sorted(Path(entry.path) for entry in os.scandir(directory)
+                      if entry.name.startswith("wr_") and entry.name.endswith(".json"))
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        if strict:
+            raise _ReviewsUnreadable(exc) from exc
+        return []
+
+
 def _match_review_decision(task: dict) -> "tuple[Path, dict, str] | None":
     # Re-resolve the owner tier, require the private room, and bind bare Yes/No
     # to its review message. An explicit review id is still room-bound.
@@ -935,7 +953,7 @@ def _match_review_decision(task: dict) -> "tuple[Path, dict, str] | None":
     room = str(task.get("channel_id") or "")
     reply_to = str(task.get("reply_to_event") or "")
     candidates = []
-    for path, record in _pending_review_records():
+    for path, record in _pending_review_records(strict=True):
         if room != str(record.get("dm_room_id") or ""):
             continue
         if str(task.get("user_id") or "") != str(record.get("owner") or ""):
@@ -955,9 +973,14 @@ def _archived_review_candidates(room: str, task: dict, explicit_id, reply_to: st
     the reply is answered with the archived outcome and acts on nothing."""
     archive = _STATE / team_result_guard.WITHHELD_RESULT_DIR / "archive"
     found = []
-    for archived in sorted(archive.glob("wr_*.json")) if archive.is_dir() else []:
-        record = _read_private_json(archived)
-        if (not record or room != str(record.get("dm_room_id") or "")
+    for archived in _review_paths(archive, strict=True):
+        try:
+            record = json.loads(archived.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise _ReviewsUnreadable(exc) from exc
+        except ValueError:
+            record = None
+        if (not isinstance(record, dict) or room != str(record.get("dm_room_id") or "")
                 or str(task.get("user_id") or "") != str(record.get("owner") or "")):
             continue
         if (explicit_id == record.get("review_id")
@@ -1088,8 +1111,8 @@ def _settle_landed_release(core: DeliveryCore, item_id: str, room: str) -> bool:
 
 
 def _settle_landed_releases() -> None:
-    """Each beat: an outbox item not yet DELIVERED whose review (live or archived) holds the
-    receipt for its claim is driven to DELIVERED until it is, never sent again."""
+    """Each beat: an outbox item not yet DELIVERED whose review holds the receipt for its claim
+    is driven to DELIVERED until it is, never sent again. Reads every item of this outbox."""
     core = _withheld_outbox()
     directory = _STATE / team_result_guard.WITHHELD_RESULT_DIR
     for item in list_items(core.backend.root):
@@ -1097,8 +1120,13 @@ def _settle_landed_releases() -> None:
         review_id, _, claim = item_id.partition(".")
         if item.get("status") == "DELIVERED" or not claim:
             continue
-        record = (_read_private_json(directory / f"{review_id}.json")
-                  or _read_private_json(directory / "archive" / f"{review_id}.json") or {})
+        record = _settlement_record(directory, review_id)
+        if record is None:
+            if f"unreadable:{review_id}" not in _REFUSED_REVIEW_PUBLICATIONS:
+                _REFUSED_REVIEW_PUBLICATIONS.add(f"unreadable:{review_id}")
+                _log(f"withheld review {review_id}: its record could not be read; its outbox "
+                     "item is not settled until it can be")
+            continue
         if (record.get("decision_claim_id") != claim
                 or not isinstance(record.get("release_event_id"), str) or not record["release_event_id"]):
             continue
@@ -1111,6 +1139,20 @@ def _settle_landed_releases() -> None:
                      "and is settled once that claim can be taken")
         except Exception as exc:  # noqa: BLE001 — next beat retries
             _log(f"withheld review {review_id}: outbox settlement deferred ({exc})")
+
+
+def _settlement_record(directory: Path, review_id: str) -> "dict | None":
+    """The archived decision owns its review, so it is read first and a live copy never hides
+    it; None (fail closed) when the record that would decide cannot be read."""
+    for path in (directory / "archive" / f"{review_id}.json", directory / f"{review_id}.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+    return {}
 
 
 def _requeue_command(root, item_id: str) -> str:
@@ -1321,7 +1363,14 @@ def _handle_review_decision(task: dict) -> bool:
     task_id = str(task.get("id") or "")
     if task_id and _control_result_path(task_id).is_file():
         return True
-    matched = _match_review_decision(task)
+    try:
+        matched = _match_review_decision(task)
+    except _ReviewsUnreadable as exc:
+        _log(f"withheld reviews: reply {task.get('id')} could not be checked ({exc})")
+        _queue_review_control_result(task, body=(
+            "Your reply could not be checked against your pending reviews right now. Nothing "
+            "changed; please reply again."))
+        return True
     if matched is None:
         return False
     path, record, answer = matched
@@ -1411,8 +1460,11 @@ def _queue_review_control_result(task: dict, body: str = "[no-send]") -> None:
     if not task_id:
         return
     path = _control_result_path(task_id)
-    if not path.is_file():
-        _atomic_private_json(path, {"id": task_id, "body": body})
+    try:
+        if not path.is_file():
+            _atomic_private_json(path, {"id": task_id, "body": body})
+    except Exception as exc:  # noqa: BLE001 — the reply is redelivered and answered then
+        _log(f"review control result {task_id} not saved: {exc}")
 
 
 def _retry_review_control_results() -> None:
