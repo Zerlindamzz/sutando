@@ -985,12 +985,18 @@ def _publish_review(path: Path, record: dict) -> bool:
             _log(f"withheld review {path.stem}: publication refused, no matching release "
                  "claim; the body stays private until the owner acts")
         return False
-    posted = team_result_guard.publication_of(path)
+    dedupe_key = f"withheld-publish:{record['review_id']}"
+    posted = team_result_guard.publication_of(path, record.get("decision_claim_id"), dedupe_key)
     if posted is not None:
-        # A POST already landed for this review: never send it again, only record it.
-        if posted == "unreadable":
+        # Evidence of a landed POST: never send it again. Evidence not bound to this claim
+        # neither POSTs nor commits; it stays for the owner.
+        if posted == "invalid":
+            if f"posted:{path}" not in _REFUSED_REVIEW_PUBLICATIONS:
+                _REFUSED_REVIEW_PUBLICATIONS.add(f"posted:{path}")
+                _log(f"withheld review {path.stem}: publication evidence does not match "
+                     "this claim; nothing posted or recorded")
             return False
-        return _commit_publication(path, record, version, str(posted.get("event_id") or ""))
+        return _commit_publication(path, record, version, posted["event_id"])
     context = record.get("context") or {}
     room = str(context.get("channel_id") or "")
     body = _released_review_body(str(record.get("withheld_body") or ""))
@@ -1000,7 +1006,6 @@ def _publish_review(path: Path, record: dict) -> bool:
         if not team_result_guard.update_record(path, record, expect=version):
             _stale_review_write(path, "publication failure")
         return False
-    dedupe_key = f"withheld-publish:{record['review_id']}"
     answer = _req("POST", "/v1/room", {
         "op": "message", "room_id": room, "body": body, "dedupe_key": dedupe_key,
     }, timeout=20)
@@ -1077,7 +1082,7 @@ def _defers_to_archive(path: Path) -> bool:
             return False
         outcome = team_result_guard.archived_outcome(archived)
         if (outcome is not None
-                and _show_review_card(path, archived)[0] is not None
+                and _edit_review_card(archived) is not None
                 and team_result_guard.retire_superseded_record(path)):
             _log(f"withheld review {path.stem}: a live copy contradicted its archived "
                  f"{outcome} decision; card restored and copy retired")
@@ -1092,26 +1097,11 @@ def _defers_to_archive(path: Path) -> bool:
     return True
 
 
-def _show_review_card(path: Path, record: dict) -> "tuple[dict | None, bool]":
-    """The one way a review card is edited: registered before it is sent, then settled
-    against the authority, so an edit that lands late, or whose reply is lost, leaves the
-    card owed again rather than left showing a superseded outcome."""
-    shown = _resolved_review_body(record)
-    seq = team_result_guard.begin_card_edit(path, shown)
-    try:
-        answer = _edit_review_card(record)
-    except Exception:
-        team_result_guard.finish_card_edit(path, seq, shown, _resolved_review_body, "unknown")
-        raise
-    outcome = "landed" if answer is not None else "rejected"
-    return answer, team_result_guard.finish_card_edit(path, seq, shown, _resolved_review_body, outcome)
-
-
 def _resolve_review_card(path: Path, record: dict) -> bool:
     if _defers_to_archive(path):
         return False
     version = team_result_guard.record_version(record)
-    answer, _settled = _show_review_card(path, record)
+    answer = _edit_review_card(record)
     if answer is None:
         return False
     record.update({"card_resolution_pending": False,
@@ -1119,29 +1109,9 @@ def _resolve_review_card(path: Path, record: dict) -> bool:
                    "card_resolution_event_id": str(answer.get("event_id") or "")})
     if not team_result_guard.update_record(path, record, expect=version):
         _stale_review_write(path, "card resolution")
-        try:
-            if not _reshow_current_card(path):
-                _log(f"withheld review {path.stem} card edit still pending")
-        except Exception as exc:  # noqa: BLE001 — the owed marker retries it
-            _log(f"withheld review {path.stem} card edit retry failed: {exc}")
         return False
     _archive_resolved_review(path, record)
     return True
-
-
-def _reshow_current_card(path: Path) -> bool:
-    """A stale card edit may land after the edit for a newer state; show the current
-    one again. The card stays owed, and is retried every beat, until an edit lands."""
-    debt = team_result_guard.mark_card_owed(path)
-    shown = team_result_guard.authoritative_review(path)
-    if shown is None:
-        return False  # unreadable or absent is no proof the card is current
-    key, current = shown
-    # A live record still pending its card is the live retry's to edit.
-    if key[0] == "archive" or not current.get("card_resolution_pending"):
-        answer, settled = _show_review_card(path, current)
-        return answer is not None and settled
-    return team_result_guard.clear_card_owed(path, key, debt, _resolved_review_body)
 
 
 def _handle_hitl_action(task: dict):
@@ -1201,7 +1171,10 @@ def _handle_review_decision(task: dict) -> bool:
     if not path.exists() and (path.parent / "archive" / path.name).exists():
         _log(f"withheld review {path.stem}: already decided; reply {task.get('id')} "
              "answered with the archived outcome")
-        _queue_review_control_result(task, body=_resolved_review_body(record))
+        outcome = team_result_guard.archived_outcome(record)
+        _queue_review_control_result(task, body=_resolved_review_body(record) if outcome else (
+            f"Review `{record.get('review_id') or path.stem}` was already decided, but its record "
+            "is not a recognised outcome. Nothing was changed; it is left for you to check."))
         return True  # a later reply to a decided review: answered, never acted on
     if record.get("status") in ("kept_private", "published"):
         _queue_review_control_result(task)
@@ -1239,7 +1212,6 @@ def _retry_withheld_reviews() -> None:
     """One poll beat's durable review retries, in order."""
     _retry_pending_publications()
     _retry_review_card_resolutions()
-    _retry_owed_review_cards()
     _retry_review_control_results()
 
 
@@ -1266,19 +1238,6 @@ def _retry_review_card_resolutions() -> None:
                 _log(f"withheld review {record.get('review_id')} card edit still pending")
         except Exception as exc:  # noqa: BLE001 — next poll retries
             _log(f"withheld review {record.get('review_id')} card edit retry failed: {exc}")
-
-
-def _retry_owed_review_cards() -> None:
-    try:
-        owed = team_result_guard.card_owed_reviews(_STATE / team_result_guard.WITHHELD_RESULT_DIR)
-    except OSError:
-        return
-    for path in owed:
-        try:
-            if not _reshow_current_card(path):
-                _log(f"withheld review {path.stem} card edit still pending")
-        except Exception as exc:  # noqa: BLE001 — next poll retries
-            _log(f"withheld review {path.stem} card edit retry failed: {exc}")
 
 
 def _control_result_path(task_id: str) -> Path:

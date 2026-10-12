@@ -460,6 +460,15 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict) -> b
     return True
 
 
+def _durable_move(source: Path, target: Path) -> None:
+    """Move a record so its only copy is never deleted before the new one is durable:
+    link, sync the target directory, then unlink and sync the source directory."""
+    os.link(source, target)                              # no-clobber: an existing file stays
+    _fsync_directory(target.parent)
+    os.unlink(source)
+    _fsync_directory(source.parent)
+
+
 def archive_record(path: Path, field: str = "withheld_body") -> bool:
     """Move a resolved record into its directory's `archive/`, under the ledger
     lock, never over an existing decision and only for the body its id was
@@ -472,8 +481,7 @@ def archive_record(path: Path, field: str = "withheld_body") -> bool:
         try:
             archive.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(archive, 0o700)
-            os.link(path, archive / path.name)           # no-clobber: an existing decision stays
-            os.unlink(path)
+            _durable_move(path, archive / path.name)
         except OSError:
             return False
     return True
@@ -506,8 +514,7 @@ def actionable_records(directory: Path, field: str = "withheld_body"):
             target = directory / CONFLICTS_DIR / f"{path.stem}.{_record_digest(path, field)[:16]}.json"
             try:
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                os.link(path, target)
-                os.unlink(path)
+                _durable_move(path, target)
                 frozen.append(target)
             except OSError:
                 continue
@@ -769,7 +776,7 @@ def retire_superseded_record(path: Path, field: str = "withheld_body") -> bool:
             return False
         target = path.parent / "archive" / "superseded"
         target.mkdir(mode=0o700, exist_ok=True)
-        os.replace(path, target / f"{path.stem}.{os.urandom(4).hex()}.json")
+        _durable_move(path, target / f"{path.stem}.{os.urandom(4).hex()}.json")
         return True
 
 
@@ -795,11 +802,6 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
         expect = record_version(record)
         record.update(updates, decision_claim_id=claim_id)
         return record if _write_owned_record(path, record, "withheld_body", expect) else None
-
-
-CARD_OWED_DIR = "card-owed"
-# An edit whose outcome is unknown may still land this long after it started.
-CARD_EDIT_HORIZON_S = 120.0
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -828,171 +830,6 @@ def _atomic_text(target: Path, text: str) -> None:
             pass
 
 
-def _owed_dir(path: Path) -> Path:
-    return _record_directory(path) / CARD_OWED_DIR
-
-
-def _next_card_seq(path: Path) -> int:
-    """The next number in the directory's card-edit order; the ledger lock is held."""
-    counter = _owed_dir(path) / ".seq"
-    try:
-        seq = int(counter.read_text(encoding="utf-8")) + 1
-    except (OSError, ValueError):
-        seq = 1
-    _atomic_text(counter, str(seq))
-    return seq
-
-
-def _write_owed_marker(path: Path) -> int:
-    """Owe this review's card from now on, whatever was owed before; lock held. The
-    marker holds its place in the edit order: only a later edit can discharge it."""
-    seq = _next_card_seq(path)
-    _atomic_text(_owed_dir(path) / path.stem, str(seq))
-    return seq
-
-
-def _inflight_entry(entry: Path) -> tuple:
-    """(started_at, shown digest) of an unsettled edit; unreadable reads as expired."""
-    try:
-        data = json.loads(entry.read_text(encoding="utf-8"))
-        return float(data["started_at"]), str(data["shown"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return 0.0, ""
-
-
-def _inflight(path: Path) -> list:
-    """(seq, started_at, shown digest, entry) for each edit of this review not yet settled."""
-    out = []
-    directory = _owed_dir(path) / ".inflight"
-    for entry in sorted(directory.glob(f"{path.stem}.*")) if directory.is_dir() else []:
-        try:
-            seq = int(entry.name.rsplit(".", 1)[1])
-        except (ValueError, IndexError):
-            seq = 0
-        out.append((seq, *_inflight_entry(entry), entry))
-    return out
-
-
-def mark_card_owed(path: Path) -> int:
-    """Record, durably and under the ledger lock, that this review's card must be edited
-    again; returns the debt's place in the edit order."""
-    path = Path(path)
-    with _ledger_lock(_record_directory(path)):
-        return _write_owed_marker(path)
-
-
-def begin_card_edit(path: Path, shown: str) -> int:
-    """Register an edit about to be sent, and what it shows, before it is sent; returns its
-    place in the edit order. Until it settles, no later edit showing another outcome can
-    discharge the card's debt."""
-    path = Path(path)
-    with _ledger_lock(_record_directory(path)):
-        seq = _next_card_seq(path)
-        _atomic_text(_owed_dir(path) / ".inflight" / f"{path.stem}.{seq}", json.dumps(
-            {"started_at": time.time(), "shown": _body_digest(shown)}))
-        return seq
-
-
-def _discharge(path: Path, seq: int, current: str) -> bool:
-    """Clear the card's debt for an edit `seq` that landed showing `current`, the current
-    outcome, unless an unsettled edit showing anything else may still land; lock held."""
-    marker = _owed_dir(path) / path.stem
-    if marker.exists():
-        try:
-            held = int(marker.read_text(encoding="utf-8"))
-        except ValueError:
-            held = 0  # a marker that does not parse is the oldest debt, never a newer one
-        except OSError:
-            return False
-        if held > seq:
-            return False
-    now, digest = time.time(), _body_digest(current)
-    entries = _inflight(path)
-    if any(other != seq and now - started < CARD_EDIT_HORIZON_S and shown != digest
-           for other, started, shown, _e in entries):
-        return False
-    for _seq, started, _shown, entry in entries:
-        if now - started >= CARD_EDIT_HORIZON_S:
-            entry.unlink(missing_ok=True)
-    marker.unlink(missing_ok=True)
-    _fsync_directory(marker.parent)
-    return True
-
-
-def finish_card_edit(path: Path, seq: int, shown: str, render, outcome: str) -> bool:
-    """Settle edit `seq`, which showed `shown`. `outcome` is landed, rejected (it did not
-    apply) or unknown (it may have applied). Re-read the authority under the ledger lock:
-    a landed edit of the current outcome discharges the debt when nothing older may still
-    land; one that may have landed showing anything else, or an unreadable authority,
-    owes the card again. Returns True when the card is known current and owes nothing."""
-    path = Path(path)
-    with _ledger_lock(_record_directory(path)):
-        entry = _owed_dir(path) / ".inflight" / f"{path.stem}.{seq}"
-        if outcome != "unknown":
-            entry.unlink(missing_ok=True)
-        if outcome == "rejected":
-            return False
-        current = _authoritative(path)
-        if outcome == "unknown" or current is None or render(current[1]) != shown:
-            _write_owed_marker(path)
-            return False
-        return _discharge(path, seq, shown)
-
-
-def card_owed_reviews(directory: Path) -> list:
-    """The review paths whose card is owed an edit, as their live path names them: those
-    with a debt marker and those with an edit that never settled within the horizon."""
-    directory = Path(directory)
-    with _ledger_lock(directory):
-        owed = directory / CARD_OWED_DIR
-        stems = {m.name for m in owed.iterdir() if not m.name.startswith(".")} \
-            if owed.is_dir() else set()
-        inflight, now = owed / ".inflight", time.time()
-        for entry in inflight.iterdir() if inflight.is_dir() else []:
-            stem = entry.name.rsplit(".", 1)[0]
-            started, _shown = _inflight_entry(entry)
-            if not entry.name.startswith(".") and now - started >= CARD_EDIT_HORIZON_S:
-                stems.add(stem)
-        return [directory / f"{stem}.json" for stem in sorted(stems)]
-
-
-def _authoritative(path: Path) -> "tuple | None":
-    """(key, record) of the review's authority, its archive first; None when it cannot
-    be read or is absent. The key names the exact version shown. Lock held by caller."""
-    archived = _archived(path)
-    source, kind = (archived, "archive") if archived.exists() else (path, "live")
-    try:
-        record = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(record, dict):
-        return None
-    return (kind, tuple(sorted(record_version(record).items()))), record
-
-
-def authoritative_review(path: Path) -> "tuple | None":
-    path = Path(path)
-    with _ledger_lock(_record_directory(path)):
-        return _authoritative(path)
-
-
-def clear_card_owed(path: Path, key, seq: int, render) -> bool:
-    """Discharge, with no edit made, the debt this repair recorded as `seq`, only while
-    the authority is still the version `key` names and nothing older may still land."""
-    path = Path(path)
-    with _ledger_lock(_record_directory(path)):
-        current = _authoritative(path)
-        if current is None or current[0] != key:
-            return False
-        marker = _owed_dir(path) / path.stem
-        try:
-            if int(marker.read_text(encoding="utf-8")) != seq:
-                return False
-        except (OSError, ValueError):
-            return False
-        return _discharge(path, seq, render(current[1]))
-
-
 PUBLISHED_DIR = "published"
 
 
@@ -1006,9 +843,10 @@ def record_publication(path: Path, claim_id, event_id: str, dedupe_key: str) -> 
              "posted_at": time.time()}, sort_keys=True))
 
 
-def publication_of(path: Path):
-    """The landed-POST evidence for this review: None when there is none, the record when
-    it reads, and the string "unreadable" when it exists but cannot be read."""
+def publication_of(path: Path, claim_id, dedupe_key: str):
+    """The landed-POST evidence for this review's active claim: None when there is none,
+    the record when it is bound to `claim_id` and `dedupe_key` with an event id, and the
+    string "invalid" for anything else, which must neither POST nor commit."""
     path = Path(path)
     sentinel = _record_directory(path) / PUBLISHED_DIR / f"{path.stem}.json"
     with _ledger_lock(_record_directory(path)):
@@ -1017,8 +855,11 @@ def publication_of(path: Path):
         try:
             record = json.loads(sentinel.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return "unreadable"
-    return record if isinstance(record, dict) else "unreadable"
+            return "invalid"
+    bound = (isinstance(record, dict) and isinstance(claim_id, str) and claim_id
+             and record.get("claim_id") == claim_id and record.get("dedupe_key") == dedupe_key
+             and isinstance(record.get("event_id"), str) and record["event_id"])
+    return record if bound else "invalid"
 
 
 def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:
