@@ -496,6 +496,18 @@ describe('every status answer comes from the one table', () => {
 		assert.ok(cancelList.includes('voiceTaskRows()') && !cancelList.includes('readdirSync'));
 	});
 
+	it('pending is what the user has not heard an answer to, finished-but-unread results included', async () => {
+		// 2026-10-11 00:11:22 UTC: five tasks; two heard, one finished but still waiting to be read, two with
+		// the core. The user was told "2 pending"; to them it was 3.
+		const { voiceTaskCounts, describeVoiceTasks } = await import('../src/inline-tools.js');
+		const row = (text: string, state: string, delivery?: string) => ({ id: text, text, submittedAt: 1, state, delivery }) as never;
+		const rows = [row('merged PRs', 'done', 'spoken'), row('PR 5302', 'done', 'spoken'), row('PR 5167', 'done'), row('PR 5329', 'started'), row('non-spicy dishes', 'queued'), row('old one', 'cancelled')];
+		assert.deepEqual(voiceTaskCounts(rows), { pending: 3, working: 2, doneNotHeard: 1 });
+		assert.match(describeVoiceTasks(rows), /^3 pending for the user \(not heard an answer yet\): 2 still being worked on, 1 done and waiting to be read to them\./);
+		const tool = src('voice-agent.ts').split("name: 'get_task_status'")[1].split('};')[0];
+		assert.ok(tool.includes('voiceTaskCounts(rows)') && tool.includes('pendingTasks: counts.pending') && !tool.includes('openTasks'), 'the tool reports the table\'s count');
+	});
+
 	it('describeVoiceTasks groups the user\'s tasks by where each stands and whether the result was heard', async () => {
 		const { describeVoiceTasks } = await import('../src/inline-tools.js');
 		const row = (text: string, state: string, delivery?: string) => ({ id: text, text, submittedAt: 1, state, delivery }) as never;

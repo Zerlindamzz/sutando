@@ -32,7 +32,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
 import { existsSync, readFileSync, unlinkSync, mkdirSync, copyFileSync, appendFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { notify as platformNotify } from './platform.js';
-import { inlineTools, personalSkillSetups, personalVoiceSurface, describeVoiceTasks } from './inline-tools.js';
+import { inlineTools, personalSkillSetups, personalVoiceSurface, describeVoiceTasks, voiceTaskCounts } from './inline-tools.js';
 import { createClientFrameHub } from './client-frame-hub.js';
 import { runSkillSetups } from './skill-setup-runner.js';
 import { setVisionSession, startVisionControlServer, stopVisionControlServer, setSessionToolUpdater, setVisionSpeechEvidence, getVisionEgressStats, isStreaming, stopStreaming as stopVisionStreaming } from './vision-tools.js';
@@ -482,16 +482,21 @@ const getTaskStatus: ToolDefinition = {
 	description:
 		'Check the tasks the user asked for by voice and where each stands now (queued, in progress, cancel requested, done, and whether the user heard the result). ' +
 		'Use for status/progress questions like "any pending tasks?", "how many tasks are there?", "are you working on something?". ' +
+		'pendingTasks is the number to give for "how many pending": tasks whose answer the user has not heard yet, whether the core is still working on them or finished and the result is still to be read. ' +
 		'Always call it for these: never answer from memory, the state changes. Do NOT call work just to check progress.',
 	parameters: z.object({}),
 	execution: 'inline',
 	execute: async () => {
 		// The relay agent's table, the same source as the in-line count and get_core_status.
 		const rows = voiceTaskRows();
-		const open = rows.filter((r) => r.state === 'queued' || r.state === 'started');
+		// Pending as the user counts it: not heard an answer yet. 2026-10-11: the core had finished a task
+		// whose result still waited to be read, the count left it out, and the user heard "2" for 3.
+		const counts = voiceTaskCounts(rows);
 		// Counts and states only: a yes/no "in progress" flag was read as "all of them are being worked on".
 		return {
-			openTasks: open.length,
+			pendingTasks: counts.pending,
+			stillBeingWorkedOn: counts.working,
+			doneNotYetHeard: counts.doneNotHeard,
 			tasks: rows.map((r) => ({ task: r.text.slice(0, 60), state: r.state, heard: r.delivery === 'spoken' || r.delivery === 'injected' })),
 			description: describeVoiceTasks(rows),
 		};

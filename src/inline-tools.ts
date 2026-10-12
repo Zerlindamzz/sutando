@@ -819,13 +819,28 @@ export function readQueueDepth(workspaceDir: string, nowSec = Math.floor(Date.no
 }
 
 /** The user's voice tasks in one sentence for the model, grouped by where each stands now. */
+const heardByUser = (r: VoiceTaskRow) => r.delivery === 'spoken' || r.delivery === 'injected';
+
+/**
+ * What "pending" means to the user: tasks whose answer they have not heard yet. The core may have
+ * finished one whose result still waits to be read to them; to the user it is pending until then.
+ */
+export function voiceTaskCounts(rows: VoiceTaskRow[]): { pending: number; working: number; doneNotHeard: number } {
+	const live = rows.filter((r) => r.state !== 'cancelled');
+	const working = live.filter((r) => r.state === 'queued' || r.state === 'started').length;
+	const doneNotHeard = live.filter((r) => r.state !== 'queued' && r.state !== 'started' && !heardByUser(r)).length;
+	return { pending: working + doneNotHeard, working, doneNotHeard };
+}
+
 export function describeVoiceTasks(rows: VoiceTaskRow[]): string {
 	if (rows.length === 0) return 'The user has asked for no tasks by voice in the last few hours.';
 	const group = (label: string, pick: (r: VoiceTaskRow) => boolean) => {
 		const hit = rows.filter(pick);
 		return hit.length ? `${hit.length} ${label} (${hit.map((r) => `"${r.text.slice(0, 40)}"`).join(', ')})` : '';
 	};
-	const heard = (r: VoiceTaskRow) => r.delivery === 'spoken' || r.delivery === 'injected';
+	const heard = heardByUser;
+	const c = voiceTaskCounts(rows);
+	const headline = `${c.pending} pending for the user (not heard an answer yet): ${c.working} still being worked on, ${c.doneNotHeard} done and waiting to be read to them. `;
 	const parts = [
 		group('in progress', (r) => r.state === 'started'),
 		group('queued', (r) => r.state === 'queued'),
@@ -833,7 +848,7 @@ export function describeVoiceTasks(rows: VoiceTaskRow[]): string {
 		group('done and already told to the user', (r) => r.state === 'done' && heard(r)),
 		group('done but the user has not heard the result yet', (r) => r.state === 'done' && !heard(r)),
 	].filter(Boolean);
-	return `Tasks the user asked for by voice: ${parts.join('; ')}.`;
+	return `${headline}Tasks the user asked for by voice: ${parts.join('; ')}.`;
 }
 
 // Get what the core agent (Claude Code proactive-loop) is currently doing.
