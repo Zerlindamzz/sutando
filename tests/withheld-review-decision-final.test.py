@@ -2234,7 +2234,7 @@ check(handled is True and "please reply again" in control_body("ns-conflicts-is-
 bridge._STATE = root / "scan-under-lock"
 path, rid = new_review("task-scan-under-lock")
 held, under_lock = [], []
-real_lock, real_load = guard.withheld_decision_lock, bridge._load_review
+real_lock, real_scan = guard.withheld_decision_lock, guard.namespace_problems
 
 
 @contextlib.contextmanager
@@ -2247,17 +2247,17 @@ def recording_lock(directory):
             held.pop()
 
 
-def recording_load(record_path):
+def recording_scan(directory):
     under_lock.append(bool(held))
-    return real_load(record_path)
+    return real_scan(directory)
 
 
-guard.withheld_decision_lock, bridge._load_review = recording_lock, recording_load
+guard.withheld_decision_lock, guard.namespace_problems = recording_lock, recording_scan
 try:
     bridge._handle_review_decision(decision("Yes", rid, "scan-under-lock"))
 finally:
-    guard.withheld_decision_lock, bridge._load_review = real_lock, real_load
-check(under_lock and all(under_lock), f"the readability scan reads under the ledger lock: {under_lock}")
+    guard.withheld_decision_lock, guard.namespace_problems = real_lock, real_scan
+check(under_lock == [True], f"the reply's preflight runs once, under the ledger lock: {under_lock}")
 
 # A linked state root with no review namespace at all: a plain owner Yes/No is ordinary chat.
 # The namespace itself as a link stays unknown: the reply is answered, never ordinary work.
@@ -2277,6 +2277,54 @@ moved.with_name(guard.WITHHELD_RESULT_DIR).symlink_to(moved.name)
 answered = bridge._handle_review_decision(decision("Yes", "", "linked-namespace") | {"task": "Yes"})
 check(answered is True and "please reply again" in control_body("linked-namespace"),
       f"a linked review namespace stays unknown: the plain reply is answered ({answered})")
+
+# A linked archive/superseded/ or conflicts/ never takes a private record out of the namespace:
+# the real retry beat leaves it in place and writes nothing outside; the reply is answered.
+def outside_files(outside):
+    return sorted(p.name for p in outside.rglob("*") if p.is_file())
+
+
+for label in ("superseded-linked", "conflicts-linked"):
+    bridge._STATE = root / f"write-{label}"
+    directory = bridge._STATE / "withheld-team-results"
+    outside = root / f"outside-{label}"
+    outside.mkdir()
+    if label == "superseded-linked":
+        (directory / "archive").mkdir(parents=True)
+        (directory / "archive" / "wr_0000000000000000.json").write_text(
+            json.dumps({**base_record, **YES, "dm_event_id": f"${label}"}))
+        live = directory / "wr_0000000000000000.json"
+        live.write_text(json.dumps({**base_record, **NO, "dm_event_id": f"${label}"}))
+        (directory / "archive" / "superseded").symlink_to(outside)
+    else:
+        live, _rid = new_review(f"task-{label}")
+        record = json.loads(live.read_text())
+        live.write_text(json.dumps({**record, "withheld_body": "ANOTHER-BODY"}))
+        (directory / "conflicts").symlink_to(outside)
+    before_bytes, before = live.read_bytes(), len(shared_posts())
+    for _beat in range(2):
+        bridge._retry_withheld_reviews()
+    rid = json.loads(before_bytes)["review_id"]
+    handled = bridge._handle_review_decision(decision("No", rid, label))
+    check(live.is_file() and live.read_bytes() == before_bytes and not outside_files(outside)
+          and len(shared_posts()) == before and handled is True
+          and "please reply again" in control_body(label),
+          f"{label}: the record stays, nothing is written outside ({outside_files(outside)}), "
+          f"the reply is answered ({handled})")
+
+# A final .issued reservation that is a link makes the reply unknown, never "no matching review".
+bridge._STATE = root / "reservation-leaf-linked"
+path, rid = new_review("task-reservation-leaf-linked")
+reservation = path.parent / "issued" / f"{path.stem}.issued"
+copy = path.parent / "reservation-copy"
+copy.write_text(reservation.read_text())
+reservation.unlink()
+reservation.symlink_to(copy.name)
+before = len(shared_posts())
+handled = bridge._handle_review_decision(decision("No", rid, "reservation-leaf-linked"))
+check(handled is True and "please reply again" in control_body("reservation-leaf-linked")
+      and json.loads(path.read_text())["status"] == "awaiting_owner" and len(shared_posts()) == before,
+      f"a linked .issued reservation: the reply is consumed and answered ({handled})")
 
 # 25v. The absence rule itself: only a genuinely missing entry below a real, readable directory
 # is absent; a symlink, a wrong kind, a non-directory parent or a dangling link raises.

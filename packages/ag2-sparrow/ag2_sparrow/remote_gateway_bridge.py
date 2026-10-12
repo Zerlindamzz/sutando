@@ -949,32 +949,18 @@ def _review_paths(directory: Path, strict: bool) -> list[Path]:
         return []
 
 
-def _load_review(path: Path) -> dict:
-    """A review record, or _ReviewsUnreadable when it cannot be read or is not a record."""
-    workspace = _STATE.parent
-    name = str(path.relative_to(workspace)) if path.is_relative_to(workspace) else path.name
-    try:
-        record = team_result_guard.read_json_strict(path)
-    except OSError as exc:
-        raise _ReviewsUnreadable(f"{name}: {exc}", name,
-                                 "it cannot be read safely: a link, an odd entry or no access") from exc
-    except ValueError as exc:
-        raise _ReviewsUnreadable(f"{name}: {exc}", name, "it is not valid JSON") from exc
-    if not isinstance(record, dict):
-        raise _ReviewsUnreadable(f"{name}: not a review record", name, "it is not a JSON object")
-    return record
-
-
 def _check_reviews_readable(directory: Path) -> None:
-    # Under the ledger lock, so no archive or freeze moves a file mid-scan; archived records
-    # are loaded the same way where a reply is matched against them.
+    # The guard's one read-only preflight, under the ledger lock so no move races it: any entry
+    # a reader would refuse makes the reply unknown, never "no matching review".
     if not team_result_guard.present(directory, stat.S_IFDIR):
         return
     with team_result_guard.withheld_decision_lock(directory):  # the lock also refuses an odd issued/
-        team_result_guard.entries(directory / "claims", "*")       # raises on an odd claims/
-        for folder in (directory, directory / "conflicts"):
-            for path in _review_paths(folder, strict=True):
-                _load_review(path)
+        problems = team_result_guard.namespace_problems(directory)
+    if problems:
+        path, reason = problems[0]
+        workspace = _STATE.parent
+        name = str(path.relative_to(workspace)) if path.is_relative_to(workspace) else path.name
+        raise _ReviewsUnreadable(f"{name}: {reason}", name, reason)
 
 
 def _match_review_decision(task: dict) -> "tuple[Path, dict, str] | None":
@@ -1012,7 +998,7 @@ def _archived_review_candidates(room: str, task: dict, explicit_id, reply_to: st
     archive = _STATE / team_result_guard.WITHHELD_RESULT_DIR / "archive"
     found = []
     for archived in _review_paths(archive, strict=True):
-        record = _load_review(archived)
+        record = _read_review_json(archived) or {}  # the preflight already refused any it cannot read
         if (room != str(record.get("dm_room_id") or "")
                 or str(task.get("user_id") or "") != str(record.get("owner") or "")):
             continue

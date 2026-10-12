@@ -339,9 +339,10 @@ def _reservation(path: Path) -> Path:
 def _reserve(path: Path, digest: str) -> bool:
     """Reserve `path`'s id for the body with `digest`: an exclusive create, so an id
     is issued exactly once and the reservation outlives archive and resolution."""
-    _reservation(path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _ensure_dir(_reservation(path).parent)
     try:
-        fd = os.open(_reservation(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(_reservation(path),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except FileExistsError:
         return False
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -389,8 +390,7 @@ def _ledger_lock(directory: Path):
     """The one lock under which a record directory's ids are issued, its records
     written, and its records archived: no transition interleaves with another."""
     issued = Path(directory) / "issued"
-    issued.mkdir(mode=0o700, parents=True, exist_ok=True)
-    present(issued, stat.S_IFDIR)  # raises on a linked or odd issued/
+    _ensure_dir(issued)  # raises on a linked or odd issued/
     fd = os.open(issued / ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         lock_fd(fd)
@@ -479,6 +479,7 @@ def namespace_problems(directory: Path) -> list:
     directory = directory if isinstance(directory, Path) else Path(directory)
     problems = []
     for folder, records in ((directory, True), (directory / "archive", True),
+                            (directory / "archive" / "superseded", True),
                             (directory / "conflicts", True), (directory / "claims", False),
                             (directory / "issued", False)):
         try:
@@ -588,9 +589,22 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
     return True
 
 
+def _ensure_dir(directory: Path) -> Path:
+    """`directory` as a real directory, created only when genuinely absent; a link or an odd entry
+    on the way raises, so nothing is ever written, moved or created through one."""
+    if not present(directory, stat.S_IFDIR):
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not present(directory, stat.S_IFDIR):
+            raise FileNotFoundError(2, "No such file or directory", str(directory))
+    return directory
+
+
 def _durable_move(source: Path, target: Path) -> None:
     """Move a record so its only copy is never deleted before the new one is durable:
     link, sync the target directory, then unlink and sync the source directory."""
+    if not present(source, stat.S_IFREG):                # a real file, reached through no link
+        raise FileNotFoundError(2, "No such file or directory", str(source))
+    _ensure_dir(target.parent)
     os.link(source, target)                              # no-clobber: an existing file stays
     _fsync_directory(target.parent)
     os.unlink(source)
@@ -610,8 +624,7 @@ def archive_record(path: Path, field: str = "withheld_body") -> bool:
             return False  # stays live; it acts only once its ownership reads again
         archive = path.parent / "archive"
         try:
-            archive.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(archive, 0o700)
+            os.chmod(_ensure_dir(archive), 0o700)
             _durable_move(path, archive / path.name)
         except OSError:
             return False
@@ -645,7 +658,6 @@ def actionable_records(directory: Path, field: str = "withheld_body"):
                 continue                                 # reconciled by the caller, never frozen
             target = directory / CONFLICTS_DIR / f"{path.stem}.{_record_digest(path, field)[:16]}.json"
             try:
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 _durable_move(path, target)
                 frozen.append(target)
             except OSError:
@@ -717,8 +729,7 @@ def journal_quarantined_attachment(body: str, state_dir: Path, task_id: str,
     timestamp = float(time.time() if now is None else now)
     directory = Path(state_dir) / SUPPRESSED_RESULT_DIR
     try:
-        directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        os.chmod(_ensure_dir(directory), 0o700)
     except OSError:
         return False
     def payload(record: Path) -> dict:
@@ -782,8 +793,7 @@ def materialize_withheld_verdict(verdict: TeamResultVerdict, body: str,
     directory = Path(state_dir) / WITHHELD_RESULT_DIR
     bounded = _bounded_context(context)
     try:
-        directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        os.chmod(_ensure_dir(directory), 0o700)
     except OSError:
         return TeamResultVerdict(VERDICT_LEAK, TEAM_LEAK_RESULT_UNSAVED, verdict.reason)
     def payload(artifact: Path) -> dict:
@@ -916,7 +926,6 @@ def retire_superseded_record(path: Path, field: str = "withheld_body") -> bool:
         if not _proven_superseded(path, field):
             return False
         target = path.parent / "archive" / "superseded"
-        target.mkdir(mode=0o700, exist_ok=True)
         _durable_move(path, target / f"{path.stem}.{os.urandom(4).hex()}.json")
         return True
 
@@ -934,8 +943,9 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
             return None  # an earlier claim whose decision did not survive: never a second one
         claim_id = os.urandom(16).hex()
         ledger = _issued_claim(path, claim_id)
-        ledger.parent.mkdir(mode=0o700, exist_ok=True)
-        os.close(os.open(ledger, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        _ensure_dir(ledger.parent)
+        os.close(os.open(ledger, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                         0o600))
         _fsync_directory(ledger.parent)  # the ledger entry is durable before the record names it
         expect, landed = record_version(record), []
         record.update(updates, decision_claim_id=claim_id, decision_durable=False)
@@ -1043,8 +1053,7 @@ def journal_suppressed_result(verdict: TeamResultVerdict, body: str,
     timestamp = float(time.time() if now is None else now)
     directory = Path(state_dir) / SUPPRESSED_RESULT_DIR
     try:
-        directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        os.chmod(_ensure_dir(directory), 0o700)
     except OSError:
         return TeamResultVerdict(VERDICT_SUPPRESS, TEAM_SUPPRESS_RESULT,
                                  "suppression record unwritable")
