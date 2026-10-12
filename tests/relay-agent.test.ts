@@ -544,10 +544,9 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		const spoken: string[][] = [];
 		const handed: string[] = [];
 		const p = createHandoffPacer({ markSpoken: (ids) => spoken.push(ids), confirmMs });
-		const h = (id: string, opts: { hand?: () => boolean; rehand?: () => boolean; fallback?: () => void } = {}) => ({
+		const h = (id: string, opts: { hand?: () => boolean; fallback?: () => void } = {}) => ({
 			ids: [id], label: id,
 			hand: opts.hand ?? (() => { handed.push(id); return true; }),
-			rehand: opts.rehand ?? (() => { handed.push(`${id} again`); return true; }),
 			fallback: opts.fallback ?? (() => handed.push(`${id} elsewhere`)),
 		});
 		return { p, h, spoken, handed };
@@ -565,19 +564,16 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		assert.deepEqual(t.handed, ['a', 'b']);
 	});
 
-	it('an answer cut off is handed over once more; cut off again, it is left', () => {
+	it('an answer the model began is said once, also when cut off: recorded spoken, never handed over again', () => {
+		// 2026-10-12 01:06: PR 5167's answer was finished, a 213 ms sound counted as a cut-off, and it was read again.
 		const t = pacer();
 		t.p.submit(t.h('a'));
 		t.p.submit(t.h('b'));
 		t.p.onTurnStart();
 		t.p.onModelAudio();
 		t.p.onTurnEnd(true);
-		assert.deepEqual(t.handed, ['a', 'a again']);
-		t.p.onTurnStart();
-		t.p.onModelAudio();
-		t.p.onTurnEnd(true);
-		assert.deepEqual(t.spoken, [], 'never recorded spoken');
-		assert.deepEqual(t.handed, ['a', 'a again', 'b']);
+		assert.deepEqual(t.spoken, [['a']], 'said once is said');
+		assert.deepEqual(t.handed, ['a', 'b'], 'the next result goes; a is not handed over again');
 	});
 
 	it('a turn that ended before the hand-off does not confirm it', () => {
@@ -633,7 +629,7 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		const p = createHandoffPacer({ markSpoken: (ids) => spoken.push(ids), userReplyWaitMs: 20 });
 		p.onUserSpeechStarted();
 		p.onUserSpeechEnded();
-		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, rehand: () => true, fallback: () => {} });
+		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, fallback: () => {} });
 		assert.deepEqual(handed, []);
 		await tick(40);
 		assert.deepEqual(handed, ['a']);
@@ -643,7 +639,7 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		const handed: string[] = [];
 		const p = createHandoffPacer({ markSpoken: () => {}, userReplyWaitMs: 30 });
 		p.onUserSpeechStarted();
-		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, rehand: () => true, fallback: () => {} });
+		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, fallback: () => {} });
 		p.onUserSpeechEnded();
 		await tick(10);
 		p.onTurnStart(); p.onModelAudio(); p.onUserSpeechStarted(); p.onTurnEnd(true); // the reply is cut off by more speech
@@ -660,7 +656,7 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		const handed: string[] = [];
 		const p = createHandoffPacer({ markSpoken: () => {}, confirmMs: 30, userReplyWaitMs: 1000 });
 		p.onUserSpeechStarted();
-		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, rehand: () => true, fallback: () => {} });
+		p.submit({ ids: ['a'], label: 'a', hand: () => { handed.push('a'); return true; }, fallback: () => {} });
 		await tick(50);
 		assert.deepEqual(handed, ['a']);
 	});

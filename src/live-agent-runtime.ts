@@ -163,7 +163,6 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 	const viaNotice = (item: ResultItem): Handoff => ({
 		ids: ids(item), label: item.taskId ?? 'result', moot: () => moot(item),
 		hand: () => { const now = current(item); if (!notice(now)) return false; record(now, 'injected'); return true; },
-		rehand: () => notice(current(item)),
 		fallback: () => retryThenDm(item),
 	});
 	const retryThenDm = (item: ResultItem) => {
@@ -235,7 +234,6 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 					console.log(`${ts()} [RelayAgent] ${item.taskId}: result returned to its work call`);
 					return true;
 				},
-				rehand: () => notice(current(item)),
 				fallback: () => deliverElsewhere(item),
 			});
 			return;

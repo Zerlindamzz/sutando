@@ -298,8 +298,6 @@ export interface Handoff {
 	label: string;
 	/** Hands it to the model now (its waiting work call or a system notice). False when it cannot. */
 	hand(): boolean;
-	/** Hands it again after a cut-off answer. */
-	rehand(): boolean;
 	/** It could not be handed: deliver it another way. */
 	fallback(): void;
 	/** The table says it no longer needs saying (checked when its turn comes). */
@@ -308,7 +306,8 @@ export interface Handoff {
 
 /**
  * Hands results to the model one at a time and confirms each from the model's next turn: a turn
- * that finishes records it spoken; one cut off hands it over once more. Two results landing at
+ * the model began saying records it spoken, also when it was cut off: said once is said (2026-10-12,
+ * a 213 ms sound after a finished sentence counted as a cut-off and the answer was read again). Two results landing at
  * once would otherwise reach the model together, and it may answer only one. A result also waits
  * while the user speaks and until the model has answered them, so it never takes the user's turn.
  * Only a turn the model spoke in counts: a turn that was only a tool call answered no one.
@@ -331,7 +330,7 @@ export function createHandoffPacer(deps: {
 	const userTurnOpen = () =>
 		speakingHold() || (userEndedAt !== null && now() - userEndedAt < (deps.userReplyWaitMs ?? USER_REPLY_WAIT_MS));
 	const queue: Handoff[] = [];
-	let current: { h: Handoff; started: boolean; retried: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
+	let current: { h: Handoff; started: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
 	const busyWith = (ids: string[]) =>
 		[...(current ? [current.h] : []), ...queue].some((h) => h.ids.some((id) => ids.includes(id)));
 	const release = () => {
@@ -362,7 +361,7 @@ export function createHandoffPacer(deps: {
 			const h = queue.shift()!;
 			if (h.moot?.()) { deps.log?.(`[RelayAgent] ${h.label}: already heard or corrected; not said`); continue; }
 			if (!h.hand()) { h.fallback(); continue; }
-			current = { h, started: false, retried: false, timer: arm() };
+			current = { h, started: false, timer: arm() };
 		}
 	}
 	return {
@@ -401,19 +400,11 @@ export function createHandoffPacer(deps: {
 				if (!current) pump();
 			}
 			if (!current?.started) return;
-			if (!interrupted) {
-				deps.markSpoken(current.h.ids);
-				release();
-				return;
-			}
-			if (current.retried || !current.h.rehand()) {
-				deps.log?.(`[RelayAgent] ${current.h.label}: answer cut off again; leaving it`);
-				release();
-				return;
-			}
-			deps.log?.(`[RelayAgent] ${current.h.label}: answer cut off; handing it over again`);
-			clearTimeout(current.timer);
-			current = { ...current, started: false, retried: true, timer: arm() };
+			// The model began saying it: said once is said. A cut-off is not a reason to say it again (a
+			// short sound after a finished sentence counts as a cut-off), and the table reads it as heard.
+			if (interrupted) deps.log?.(`[RelayAgent] ${current.h.label}: answer cut off; not said again`);
+			deps.markSpoken(current.h.ids);
+			release();
 		},
 		/** Whether a result for this task is queued or on its way to the model. */
 		has(taskId: string): boolean {
