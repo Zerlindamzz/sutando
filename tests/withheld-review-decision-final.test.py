@@ -2312,6 +2312,52 @@ for label in ("superseded-linked", "conflicts-linked"):
           f"{label}: the record stays, nothing is written outside ({outside_files(outside)}), "
           f"the reply is answered ({handled})")
 
+# archive/superseded/ swapped for a link right after it is verified: the move goes through the
+# verified directory fds, so the record stays and nothing lands outside.
+bridge._STATE = root / "write-superseded-swapped"
+directory = bridge._STATE / "withheld-team-results"
+outside = root / "outside-superseded-swapped"
+outside.mkdir()
+(directory / "archive" / "superseded").mkdir(parents=True)
+(directory / "archive" / "wr_0000000000000000.json").write_text(
+    json.dumps({**base_record, **YES, "dm_event_id": "$superseded-swapped"}))
+live = directory / "wr_0000000000000000.json"
+live.write_text(json.dumps({**base_record, **NO, "dm_event_id": "$superseded-swapped"}))
+before_bytes, real_ensure = live.read_bytes(), guard._ensure_dir
+
+
+def ensure_then_swap(folder):
+    verified = real_ensure(folder)
+    if pathlib.Path(folder).name == "superseded" and not pathlib.Path(folder).is_symlink():
+        pathlib.Path(folder).rename(pathlib.Path(folder).with_name("superseded-moved"))
+        pathlib.Path(folder).symlink_to(outside)
+    return verified
+
+
+guard._ensure_dir = ensure_then_swap
+try:
+    bridge._retry_withheld_reviews()
+finally:
+    guard._ensure_dir = real_ensure
+check(live.is_file() and live.read_bytes() == before_bytes and not outside_files(outside),
+      f"superseded/ swapped after its check: the record stays, nothing outside ({outside_files(outside)})")
+
+# The suppression and quarantine journals refuse a linked suppressed-team-results/: nothing is
+# written or changed outside, and each reports it could not save.
+for label in ("suppressed", "quarantined"):
+    state, outside = root / f"journal-{label}", root / f"journal-{label}-outside"
+    state.mkdir()
+    outside.mkdir(mode=0o755)
+    (state / guard.SUPPRESSED_RESULT_DIR).symlink_to(outside)
+    if label == "suppressed":
+        deliver = guard.TeamResultVerdict(guard.VERDICT_DELIVER, "[no-send]", None)
+        saved = guard.journal_suppressed_result(deliver, "[no-send]", state, "task-j", now=1000)
+        refused = saved.kind == guard.VERDICT_SUPPRESS and saved.body == guard.TEAM_SUPPRESS_RESULT
+    else:
+        refused = guard.journal_quarantined_attachment("[file: /tmp/x]\nB", state, "task-j", now=1000) is False
+    check(refused and not any(outside.iterdir()) and outside.stat().st_mode & 0o777 == 0o755,
+          f"journal-{label}: a linked suppression namespace is refused, nothing written outside")
+
 # A final .issued reservation that is a link makes the reply unknown, never "no matching review".
 bridge._STATE = root / "reservation-leaf-linked"
 path, rid = new_review("task-reservation-leaf-linked")

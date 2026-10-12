@@ -444,22 +444,32 @@ def read_strict(path: Path) -> str:
 
 
 def _open_no_follow(path: Path) -> int:
-    # Each directory from the namespace down is opened relative to the last and never through a
-    # link, so a directory swapped for a link after the walk is refused too.
+    path = path if isinstance(path, Path) else Path(path)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if not hasattr(os, "O_DIRECTORY"):  # no dir_fd walk on this platform: the leaf alone
         return os.open(path, os.O_RDONLY | nofollow)
-    path = path if isinstance(path, Path) else Path(path)
-    root = _namespace_root(path)
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    fd = _open_dir(path.parent)
     try:
-        for name in path.relative_to(root).parts[:-1]:
-            step = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=fd)
-            os.close(fd)
-            fd = step
         return os.open(path.name, os.O_RDONLY | nofollow, dir_fd=fd)
     finally:
         os.close(fd)
+
+
+def _open_dir(directory: Path) -> int:
+    # Each directory from the namespace down is opened relative to the last and never through a
+    # link, so a directory swapped for a link after the walk is refused, not followed.
+    nofollow, flags = getattr(os, "O_NOFOLLOW", 0), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    root = _namespace_root(directory / "entry")         # the same root the walk of an entry uses
+    fd = os.open(root, flags | nofollow)
+    try:
+        for name in directory.relative_to(root).parts:
+            step = os.open(name, flags | nofollow, dir_fd=fd)
+            os.close(fd)
+            fd = step
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def read_json_strict(path: Path):
@@ -591,7 +601,8 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
 
 def _ensure_dir(directory: Path) -> Path:
     """`directory` as a real directory, created only when genuinely absent; a link or an odd entry
-    on the way raises, so nothing is ever written, moved or created through one."""
+    on the way raises. Known limit: only moves and reads use verified directory fds; other writes
+    check the path first, so a concurrent swapper with state-dir write access could redirect them."""
     if not present(directory, stat.S_IFDIR):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not present(directory, stat.S_IFDIR):
@@ -605,10 +616,25 @@ def _durable_move(source: Path, target: Path) -> None:
     if not present(source, stat.S_IFREG):                # a real file, reached through no link
         raise FileNotFoundError(2, "No such file or directory", str(source))
     _ensure_dir(target.parent)
-    os.link(source, target)                              # no-clobber: an existing file stays
-    _fsync_directory(target.parent)
-    os.unlink(source)
-    _fsync_directory(source.parent)
+    if not hasattr(os, "O_DIRECTORY"):                   # no dir_fd walk on this platform
+        os.link(source, target)
+        _fsync_directory(target.parent)
+        os.unlink(source)
+        _fsync_directory(source.parent)
+        return
+    source_fd = _open_dir(source.parent)
+    try:
+        target_fd = _open_dir(target.parent)             # a folder swapped for a link is refused here
+        try:
+            os.link(source.name, target.name, src_dir_fd=source_fd, dst_dir_fd=target_fd,
+                    follow_symlinks=False)               # no-clobber: an existing file stays
+            _fsync_directory(target.parent)
+            os.unlink(source.name, dir_fd=source_fd)
+            _fsync_directory(source.parent)
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(source_fd)
 
 
 def archive_record(path: Path, field: str = "withheld_body") -> bool:
