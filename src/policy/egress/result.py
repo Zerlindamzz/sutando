@@ -19,6 +19,7 @@ journaled, rather than refused.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -34,11 +35,11 @@ from typing import NamedTuple
 try:  # pragma: no cover - the packaged twin exercises the relative imports
     from .result_markers import parse_markers  # packaged sibling (ag2-sparrow)
     from .local_task_protocol import canonical_access_tier, parse_task_headers
-    from .file_lock import locked_file
+    from .file_lock import lock_fd, unlock_fd
 except ImportError:
     from result_markers import parse_markers  # monorepo src/ on sys.path
     from local_task_protocol import canonical_access_tier, parse_task_headers
-    from file_lock import locked_file
+    from file_lock import lock_fd, unlock_fd
 
 TEAM_LEAK_RESULT = (
     "I completed the Team task, but the response was withheld because it may "
@@ -286,13 +287,258 @@ def _bounded_context(context) -> dict:
     return {key: str(context.get(key) or "")[:512] for key in keys}
 
 
-def withheld_review_id(task_id: str) -> str:
-    identity = task_id.encode() if task_id else os.urandom(32)
+def withheld_review_id(task_id: str, body_digest: str = "") -> str:
+    """Task-keyed for a task's first recorded body; a later, different body of the
+    same task gets its own id, keyed by the digest of that body."""
+    if not task_id:
+        identity = os.urandom(32)
+    else:
+        identity = (task_id + ("\0" + body_digest if body_digest else "")).encode()
     return f"wr_{hashlib.sha256(identity).hexdigest()[:16]}"
 
 
-def withheld_review_path(state_dir: Path, task_id: str) -> Path:
-    return Path(state_dir) / WITHHELD_RESULT_DIR / f"{withheld_review_id(task_id)}.json"
+def withheld_review_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:
+    return Path(state_dir) / WITHHELD_RESULT_DIR / f"{withheld_review_id(task_id, body_digest)}.json"
+
+
+def _body_digest(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _holds(path: Path, field: str, body: str) -> bool:
+    """The record at `path` is about exactly `body`; unreadable is not a match."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get(field) == body
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+# Ids a record may take for one body of a task: the task-keyed one, then ones keyed
+# by the body's digest. Every id ever issued is reserved in `issued/`, never released.
+_ID_TRIES = 8
+
+
+def _candidates(path_of, state_dir: Path, task_id: str, body: str):
+    digest = _body_digest(body)
+    yield path_of(state_dir, task_id)
+    yield path_of(state_dir, task_id, digest)
+    for n in range(2, _ID_TRIES):
+        yield path_of(state_dir, task_id, f"{digest}#{n}")
+
+
+def _archived(path: Path) -> Path:
+    return path.parent / "archive" / path.name
+
+
+def _reservation(path: Path) -> Path:
+    return path.parent / "issued" / f"{path.stem}.issued"
+
+
+def _reserve(path: Path, digest: str) -> bool:
+    """Reserve `path`'s id for the body with `digest`: an exclusive create, so an id
+    is issued exactly once and the reservation outlives archive and resolution."""
+    _reservation(path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        fd = os.open(_reservation(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(digest)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return True
+
+
+def _issued_to(path: Path, field: str) -> "str | None":
+    """The body digest `path`'s id was issued to; None if never issued. A record
+    from before reservations existed is reserved first (seeding), and an unreadable
+    one counts as issued to no body this rule can match."""
+    try:
+        return _reservation(path).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        pass
+    for existing in (_archived(path), path):           # a decision owns the id it decided
+        if existing.exists():
+            _reserve(path, _record_digest(existing, field))
+            return _reservation(path).read_text(encoding="utf-8").strip()
+    return None
+
+
+def _record_digest(path: Path, field: str) -> str:
+    """The digest of the body a record holds; "unreadable" matches no body."""
+    try:
+        body = json.loads(path.read_text(encoding="utf-8")).get(field)
+    except (OSError, ValueError, AttributeError):
+        return "unreadable"
+    return _body_digest(body) if isinstance(body, str) else "unreadable"
+
+
+def _record_of(path: Path, digest: str, field: str) -> "Path | None":
+    """The record of an id issued to `digest`, its decision first: only a record
+    holding that very body, never another body's copy under the same id."""
+    for existing in (_archived(path), path):
+        if existing.exists() and _record_digest(existing, field) == digest:
+            return existing
+    return None
+
+
+@contextlib.contextmanager
+def _ledger_lock(directory: Path):
+    """The one lock under which a record directory's ids are issued, its records
+    written, and its records archived: no transition interleaves with another."""
+    issued = Path(directory) / "issued"
+    issued.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(issued / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        lock_fd(fd)
+        try:
+            yield
+        finally:
+            unlock_fd(fd)
+    finally:
+        os.close(fd)
+
+
+def _record_directory(path: Path) -> Path:
+    path = Path(path)
+    return path.parent.parent if path.parent.name == "archive" else path.parent
+
+
+def _owns_its_id(path: Path, field: str) -> bool:
+    """A live record may act only while its id is reserved to the body it holds
+    and no decision for that id is archived; an archived decision is immutable."""
+    return (path.parent.name != "archive" and not _archived(path).exists()
+            and _issued_to(path, field) == _record_digest(path, field))
+
+
+def update_record(path: Path, record: dict, field: str = "withheld_body") -> bool:
+    """Rewrite a live record under the ledger lock, only while it owns its id: a
+    record already archived, never written, or conflicting with its id's
+    reservation is left alone, so no update recreates or overwrites a decision."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        return _write_owned_record(path, record, field)
+
+
+def _write_owned_record(path: Path, record: dict, field: str) -> bool:
+    """The one writer of a live record; the caller holds the ledger lock. Refuses a
+    record that does not own its id or would change the body it holds."""
+    if not path.is_file() or not _owns_its_id(path, field) or record.get(field) != json.loads(
+            path.read_text(encoding="utf-8")).get(field):
+        return False
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return True
+
+
+def archive_record(path: Path, field: str = "withheld_body") -> bool:
+    """Move a resolved record into its directory's `archive/`, under the ledger
+    lock, never over an existing decision and only for the body its id was
+    issued to: the id stays reserved, so it is never issued again."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        if not path.is_file() or not _owns_its_id(path, field):
+            return False
+        archive = path.parent / "archive"
+        try:
+            archive.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(archive, 0o700)
+            os.link(path, archive / path.name)           # no-clobber: an existing decision stays
+            os.unlink(path)
+        except OSError:
+            return False
+    return True
+
+
+CONFLICTS_DIR = "conflicts"
+
+
+def actionable_records(directory: Path, field: str = "withheld_body"):
+    """The live records of `directory` that may act, under the ledger lock, and the
+    ones frozen instead: a record whose id is reserved to another body, or whose
+    id already has an archived decision, moves to `conflicts/` for the owner and
+    never acts. A copy of the body a proven archived outcome holds is left in place
+    for the caller to reconcile. Returns (actionable [(path, record)], frozen [path])."""
+    directory = Path(directory)
+    actionable, frozen = [], []
+    if not directory.is_dir():
+        return actionable, frozen
+    with _ledger_lock(directory):
+        for path in sorted(directory.glob("*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                record = None                            # unreadable: never acts, frozen below
+            if isinstance(record, dict) and _owns_its_id(path, field):
+                actionable.append((path, record))
+                continue
+            if _proven_superseded(path, field):
+                continue                                 # reconciled by the caller, never frozen
+            target = directory / CONFLICTS_DIR / f"{path.stem}.{_record_digest(path, field)[:16]}.json"
+            try:
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.link(path, target)
+                os.unlink(path)
+                frozen.append(target)
+            except OSError:
+                continue
+    return actionable, frozen
+
+
+def _find_record(path_of, state_dir: Path, task_id: str, body: str, field: str) -> Path:
+    """Where the record of this exact body is, without issuing an id."""
+    digest, unissued = _body_digest(body), None
+    first = path_of(state_dir, task_id)
+    if not first.parent.exists():
+        return first
+    with _ledger_lock(first.parent):
+        for path in _candidates(path_of, state_dir, task_id, body):
+            owner = _issued_to(path, field)
+            if owner == digest:
+                found = _record_of(path, digest, field)
+                if found is not None:
+                    return found
+            elif owner is None and unissued is None:
+                unissued = path                     # where this body's record would be issued
+    return unissued or path_of(state_dir, task_id, digest)
+
+
+def _issue_record(path_of, state_dir: Path, task_id: str, body: str, field: str,
+                  make_payload) -> "tuple[Path | None, bool]":
+    """The record for this exact body, issuing an id only once, ever: an id
+    reserved for this body returns its record (its decision first) and is never
+    written again; one reserved for another body is skipped. Returns (path, saved);
+    runs under the ledger lock, as does every archive, so no transition interleaves."""
+    first = path_of(state_dir, task_id)
+    digest = _body_digest(body)
+    with _ledger_lock(first.parent):
+        for path in _candidates(path_of, state_dir, task_id, body):
+            owner = _issued_to(path, field)
+            if owner is None and _reserve(path, digest):
+                return path, _write_artifact(path, make_payload(path), field)
+            if (owner or _issued_to(path, field)) == digest:
+                found = _record_of(path, digest, field)
+                if found is not None:
+                    return found, True
+        return None, False
+
+
+def withheld_review_artifact(state_dir: Path, task_id: str, body: str) -> Path:
+    """Where the private review of this exact withheld body lives."""
+    return _find_record(withheld_review_path, state_dir, task_id, body, "withheld_body")
 
 
 def is_attach_only_withhold(body: str) -> bool:
@@ -302,8 +548,8 @@ def is_attach_only_withhold(body: str) -> bool:
     return "attach" in kinds and "redirect" not in kinds
 
 
-def quarantined_attachment_path(state_dir: Path, task_id: str) -> Path:
-    return Path(state_dir) / SUPPRESSED_RESULT_DIR / f"qa_{withheld_review_id(task_id)}.json"
+def quarantined_attachment_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:
+    return Path(state_dir) / SUPPRESSED_RESULT_DIR / f"qa_{withheld_review_id(task_id, body_digest)}.json"
 
 
 def journal_quarantined_attachment(body: str, state_dir: Path, task_id: str,
@@ -320,25 +566,29 @@ def journal_quarantined_attachment(body: str, state_dir: Path, task_id: str,
         os.chmod(directory, 0o700)
     except OSError:
         return False
-    payload = {
-        "schema_version": 1,
-        "record_id": withheld_review_id(task_id),
-        "task_id": task_id,
-        "status": "withheld_attachment_pending",
-        "created_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
-        "withheld_body": body,
-    }
+    def payload(record: Path) -> dict:
+        return {
+            "schema_version": 1,
+            "record_id": record.stem[len("qa_"):],
+            "task_id": task_id,
+            "status": "withheld_attachment_pending",
+            "created_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+            "withheld_body": body,
+        }
     try:
-        return _write_artifact(quarantined_attachment_path(state_dir, task_id), payload)
+        return _issue_record(quarantined_attachment_path, state_dir, task_id, body,
+                             "withheld_body", payload)[1]
     except OSError:
         # best-effort for real: a failed record costs the release option,
         # never the already-decided withhold and never the delivery loop
         return False
 
 
-def _write_artifact(path: Path, payload: dict) -> bool:
+def _write_artifact(path: Path, payload: dict, field: str) -> bool:
+    """True only when `path` holds a record of this payload's body: an existing
+    record of another body is never claimed as written."""
     if path.is_file():
-        return True
+        return _holds(path, field, payload[field])
     fd, temporary = tempfile.mkstemp(prefix=".withheld-", suffix=".tmp", dir=path.parent)
     try:
         if os.name != "nt":
@@ -356,7 +606,7 @@ def _write_artifact(path: Path, payload: dict) -> bool:
                 os.link(temporary, path)
         except FileExistsError:
             pass
-        return path.is_file()
+        return _holds(path, field, payload[field])
     finally:
         try:
             os.unlink(temporary)
@@ -378,37 +628,41 @@ def materialize_withheld_verdict(verdict: TeamResultVerdict, body: str,
         os.chmod(directory, 0o700)
     except OSError:
         return TeamResultVerdict(VERDICT_LEAK, TEAM_LEAK_RESULT_UNSAVED, verdict.reason)
-    artifact = withheld_review_path(state_dir, task_id)
-    payload = {
-        "schema_version": 2,
-        "review_id": withheld_review_id(task_id),
-        "status": "pending_dm",
-        "created_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
-        "task_id": task_id,
-        "agent_id": agent_id,
-        "reason": verdict.reason,
-        "context": bounded,
-        "withheld_body": body,
-    }
+    def payload(artifact: Path) -> dict:
+        return {
+            "schema_version": 2,
+            "review_id": artifact.stem,
+            "status": "pending_dm",
+            "created_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "reason": verdict.reason,
+            "context": bounded,
+            "withheld_body": body,
+        }
     try:
-        saved = _write_artifact(artifact, payload)
+        artifact, saved = _issue_record(withheld_review_path, state_dir, task_id, body,
+                                        "withheld_body", payload)
     except Exception:  # noqa: BLE001 — storage failure must remain fail-closed
-        saved = False
+        artifact, saved = None, False
     if not saved:
         return TeamResultVerdict(VERDICT_LEAK, TEAM_LEAK_RESULT_UNSAVED, verdict.reason)
+    if artifact.parent.name == "archive":
+        return TeamResultVerdict(
+            VERDICT_SUPPRESS, "[no-send]", f"{verdict.reason}; already decided in owner review {artifact.stem}")
     return TeamResultVerdict(
         VERDICT_SUPPRESS, "[no-send]", f"{verdict.reason}; pending private owner review")
 
 
 def withheld_decision_lock(directory: Path):
-    """The one lock over a review directory's decision records; every decision
-    read-check-write and every publication check holds it."""
-    return locked_file(Path(directory) / ".decision.lock", create_mode=0o600)
+    """The ledger lock: decision claims and publication checks serialize with every
+    id issue, record write and archive in the directory."""
+    return _ledger_lock(directory)
 
 
 def _live_undecided_record(path: Path) -> "dict | None":
     # An archived decision for the same review always wins over a live record.
-    if (path.parent / "archive" / path.name).exists():
+    if _archived(path).exists():
         return None
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -428,7 +682,7 @@ def withheld_claim_publishable(path: Path, claim_id) -> bool:
     if not (isinstance(claim_id, str) and len(claim_id) == 32
             and all(c in "0123456789abcdef" for c in claim_id)):
         return False
-    with withheld_decision_lock(path.parent):
+    with withheld_decision_lock(_record_directory(path)):
         record = _live_undecided_record(path)
         issued = _issued_claim(path, claim_id).is_file()
     return (issued and record is not None and record.get("status") == "publish_pending"
@@ -440,8 +694,8 @@ def archived_withheld_decision(path: Path) -> "dict | None":
     """The archived decision that owns this review, or None if there is none; {}
     when it exists but is unreadable. A live copy beside it must never act."""
     path = Path(path)
-    archived = path.parent / "archive" / path.name
-    with withheld_decision_lock(path.parent):
+    archived = _archived(path)
+    with withheld_decision_lock(_record_directory(path)):
         if not archived.exists():
             return None
         try:
@@ -452,7 +706,7 @@ def archived_withheld_decision(path: Path) -> "dict | None":
 
 
 # The reconcile table: the only archived (status, decision) pairs a live copy may be
-# reconciled to. Any other pair, or a malformed archive, is left untouched for the owner.
+# reconciled to. Any other pair, or a malformed archive, is frozen for the owner.
 ARCHIVED_OUTCOMES = {
     ("kept_private", "sensitive"): "kept_private",
     ("published", "false_positive"): "published",
@@ -468,12 +722,33 @@ def archived_outcome(archived) -> "str | None":
     return ARCHIVED_OUTCOMES.get(key) if all(isinstance(k, str) for k in key) else None
 
 
-def retire_superseded_record(path: Path) -> bool:
-    """Move a live copy that an archived decision outranks into archive/superseded/,
-    so the hot directory again agrees with the archive. The archive is untouched."""
+def _proven_superseded(path: Path, field: str) -> bool:
+    """A live copy of the very body its archived decision holds, and that decision
+    proves an outcome: the one case reconciled instead of frozen. Lock held by caller."""
+    archived = _archived(path)
+    if not (path.is_file() and archived.is_file()):
+        return False
+    try:
+        decision = json.loads(archived.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    digest = _record_digest(path, field)
+    return (archived_outcome(decision) is not None and digest != "unreadable"
+            and digest == _record_digest(archived, field))
+
+
+def proven_superseded_record(path: Path, field: str = "withheld_body") -> bool:
     path = Path(path)
-    with withheld_decision_lock(path.parent):
-        if not (path.parent / "archive" / path.name).exists() or not path.exists():
+    with _ledger_lock(_record_directory(path)):
+        return _proven_superseded(path, field)
+
+
+def retire_superseded_record(path: Path, field: str = "withheld_body") -> bool:
+    """Move a live copy that a proven archived decision outranks into
+    archive/superseded/; anything else stays for the freeze. The archive is untouched."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        if not _proven_superseded(path, field):
             return False
         target = path.parent / "archive" / "superseded"
         target.mkdir(mode=0o700, exist_ok=True)
@@ -482,12 +757,13 @@ def retire_superseded_record(path: Path) -> bool:
 
 
 def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
-    """Apply the owner's decision only to a record still awaiting it; None means it
-    was already decided (or is gone), so the reply must change nothing."""
+    """Apply the owner's decision only to a record still awaiting it and owning its
+    id; None means it was already decided (or is gone), so the reply changes nothing."""
     path = Path(path)
-    with withheld_decision_lock(path.parent):
+    with _ledger_lock(_record_directory(path)):
         record = _live_undecided_record(path)
-        if record is None or record.get("status") != "awaiting_owner":
+        if (record is None or record.get("status") != "awaiting_owner"
+                or not _owns_its_id(path, "withheld_body")):
             return None
         claim_id = os.urandom(16).hex()
         ledger = _issued_claim(path, claim_id)
@@ -500,24 +776,16 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
             finally:
                 os.close(directory)
         record.update(updates, decision_claim_id=claim_id)
-        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(record, handle, ensure_ascii=False, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-        return record
+        return record if _write_owned_record(path, record, "withheld_body") else None
 
 
-def suppressed_record_path(state_dir: Path, task_id: str) -> Path:
-    return Path(state_dir) / SUPPRESSED_RESULT_DIR / f"{withheld_review_id(task_id)}.json"
+def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:
+    return Path(state_dir) / SUPPRESSED_RESULT_DIR / f"{withheld_review_id(task_id, body_digest)}.json"
+
+
+def suppressed_record_for(state_dir: Path, task_id: str, body: str) -> Path:
+    """Where the suppression record of this exact body lives."""
+    return _find_record(suppressed_record_path, state_dir, task_id, body, "suppressed_body")
 
 
 def journal_suppressed_result(verdict: TeamResultVerdict, body: str,
@@ -540,19 +808,21 @@ def journal_suppressed_result(verdict: TeamResultVerdict, body: str,
     except OSError:
         return TeamResultVerdict(VERDICT_SUPPRESS, TEAM_SUPPRESS_RESULT,
                                  "suppression record unwritable")
-    payload = {
-        "schema_version": 1,
-        "record_id": withheld_review_id(task_id),
-        "status": "suppressed_silent_close",
-        "created_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
-        "task_id": task_id,
-        "agent_id": agent_id,
-        "reason": verdict.reason,
-        "context": _bounded_context(context),
-        "suppressed_body": body,
-    }
+    def payload(record: Path) -> dict:
+        return {
+            "schema_version": 1,
+            "record_id": record.stem,
+            "status": "suppressed_silent_close",
+            "created_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "reason": verdict.reason,
+            "context": _bounded_context(context),
+            "suppressed_body": body,
+        }
     try:
-        saved = _write_artifact(suppressed_record_path(state_dir, task_id), payload)
+        saved = _issue_record(suppressed_record_path, state_dir, task_id, body,
+                              "suppressed_body", payload)[1]
     except Exception:  # noqa: BLE001 -- storage failure must remain fail-closed
         saved = False
     if not saved:

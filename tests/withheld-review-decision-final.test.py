@@ -278,7 +278,7 @@ for label in ("stale-published", "direct-resolve"):
           f"{label}: card restored to the archive and copy retired, archive untouched: {edits}")
 
 # 6c. The reconcile table, every row: only a proven archived (status, decision) pair
-# restores the card and retires the copy; any other archive leaves everything untouched.
+# restores the card and retires the copy; any other archive freezes the copy in conflicts/.
 PROVEN = {"kept_private/sensitive": "kept_private", "published/false_positive": "published",
           "publish_failed/false_positive": "publish_failed"}
 EXPECTED_CARD = {"kept_private": "Kept private", "published": "Published to the original room",
@@ -320,8 +320,33 @@ for label, archived_fields in rows:
               and any(p.read_bytes() == legacy_bytes for p in superseded),
               f"table {label}: card shows {expected} once and the copy is retired: {edits}")
     else:
-        check(edits == [] and unchanged(live, live_state),
-              f"table {label}: unproven archive leaves card and copy untouched: {edits}")
+        held = list((directory / "conflicts").glob("wr_0000000000000000.*.json"))
+        check(edits == [] and not live.exists() and superseded == []
+              and any(p.read_bytes() == legacy_bytes for p in held),
+              f"table {label}: unproven archive freezes the copy in conflicts/, no card edit: {edits}")
+
+# 6d. The split, pinned: a proven pair is reconciled, while the same proven archive beside
+# a copy of a different body is frozen in conflicts/ and never acts.
+for label, live_body, proven in (("split-proven", "SECRET-BODY", True),
+                                 ("split-other-body", "OTHER-BODY", False)):
+    bridge._STATE = root / "table" / label
+    directory = bridge._STATE / "withheld-team-results"
+    (directory / "archive").mkdir(parents=True)
+    archived = directory / "archive" / "wr_0000000000000000.json"
+    archived.write_text(json.dumps({**card, "status": "kept_private", "decision": "sensitive"}))
+    live = directory / "wr_0000000000000000.json"
+    live.write_text(json.dumps({**card, **NO, "withheld_body": live_body}))
+    legacy_bytes, mark = live.read_bytes(), len(calls)
+    bridge._retry_withheld_reviews()
+    edits = [p["body"] for _m, u, p in calls[mark:]
+             if u == "/v1/room" and p.get("op") == "edit" and p.get("event_id") == "$table-card"]
+    superseded = list((directory / "archive" / "superseded").glob("wr_0000000000000000.*.json"))
+    held = list((directory / "conflicts").glob("wr_0000000000000000.*.json"))
+    moved_to = superseded if proven else held
+    check(not live.exists() and len(edits) == (1 if proven else 0)
+          and (held == [] if proven else superseded == [])
+          and any(p.read_bytes() == legacy_bytes for p in moved_to),
+          f"{label}: {'reconciled and retired' if proven else 'frozen in conflicts/, never acts'}")
 bridge._STATE = root / "state"
 
 # 7. Every non-awaiting or unproven state refuses a claim, a publication and the whole
@@ -381,9 +406,12 @@ for label, content in cases.items():
     check(claims == [None, None] and published is False and len(shared_posts()) == before,
           f"{label}: claims {claims}, publish {published}, "
           f"{len(shared_posts()) - before} posts")
-    # A decided record may be archived by the beat, as it always was: same bytes, moved.
+    # A decided record may be archived by the beat, and an unproven conflict is frozen in
+    # conflicts/ for the owner: either way the same bytes, moved, never acted on.
     moved = directory / "archive" / case_path.name
-    landed = moved if not case_path.exists() and "archived" not in label else case_path
+    held = sorted((directory / "conflicts").glob(f"{case_path.stem}.*.json"))
+    landed = (case_path if case_path.exists() else held[0] if held
+              else moved if "archived" not in label else case_path)
     check(unchanged(landed, before_state), f"{label}: record bytes or mtime changed")
 bridge._STATE = root / "state"
 
@@ -472,6 +500,9 @@ class _Clock:
     now = 1_000_000.0
 
     def time(self):
+        return self.now
+
+    def monotonic(self):
         return self.now
 
     def sleep(self, seconds):
