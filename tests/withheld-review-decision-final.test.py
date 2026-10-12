@@ -1808,6 +1808,27 @@ check(unreadable_status != "DELIVERED"
       and outbox_item(path, rid, claimed).get("status") == "DELIVERED",
       f"an unreadable archive is never outranked by its live copy ({unreadable_status})")
 
+# 25n2. A dangling archive record is unknown, never absent: the live copy does not settle it.
+path, rid, claimed, room_req = release("archive-dangling", lambda: {"event_id": "$dangling"})
+provider._record_receipt = receipt_then_crash
+bridge._req = room_req
+try:
+    bridge._publish_review(path, claimed)
+except Crash:
+    pass
+finally:
+    bridge._req = fake_req
+    provider._record_receipt = real_record
+archived = path.parent / "archive" / path.name
+archived.parent.mkdir(parents=True, exist_ok=True)
+archived.symlink_to("missing-target.json")
+owner_died(path, rid, claimed)
+bridge._settle_landed_releases()
+check(outbox_item(path, rid, claimed).get("status") != "DELIVERED",
+      "a dangling archive record is never outranked by its live copy at settlement")
+archived.unlink()
+bridge._settle_landed_releases()
+
 # 25o. Settlement drives the outbox only through claim and complete: no POST, no other call.
 path, rid, claimed, room_req = release("settle-only", lambda: {"event_id": "$settle-only"})
 provider._record_receipt = receipt_then_crash
@@ -2125,6 +2146,12 @@ site["orphan-claim"] = (raises_unknown(lambda: guard.claim_withheld_decision(fre
 site["issued-claims"] = raises_unknown(lambda: guard.issued_claims(fresh))
 site["decision-lost"] = raises_unknown(lambda: guard.decision_lost(fresh))
 claims_dir.unlink()
+claims_dir.mkdir(mode=0o700)
+with unreadable_like_314(claims_dir, stat=False, listing=True):
+    site["orphan-claim-listing"] = raises_unknown(
+        lambda: guard.claim_withheld_decision(fresh, dict(NO)))
+site["orphan-claim-listing"] = (site["orphan-claim-listing"] and not any(claims_dir.iterdir())
+                                and json.loads(fresh.read_text())["status"] == "awaiting_owner")
 claimed_path, _claimed_rid = new_review("task-site-ledger")
 ledger_claim = guard.claim_withheld_decision(claimed_path, dict(NO))["decision_claim_id"]
 with unreadable_like_314(claimed_path.parent / "claims"):
@@ -2176,6 +2203,16 @@ for kind in ("archive-is-file", "archive-record-dangling", "archive-dir-dangling
           f"{kind}: nothing posts, nothing is marked published, the reply is answered "
           f"({len(shared_posts()) - before} POST(s), status {status}, gate raised {raised})")
 
+# A conflicts/ of the wrong kind cannot be read at the match: the reply is answered, never applied.
+bridge._STATE = root / "ns-conflicts-is-file"
+path, rid = new_review("task-ns-conflicts-is-file")
+(path.parent / "conflicts").write_text("not a directory")
+before = len(shared_posts())
+handled = bridge._handle_review_decision(decision("No", rid, "ns-conflicts-is-file"))
+check(handled is True and "please reply again" in control_body("ns-conflicts-is-file")
+      and json.loads(path.read_text())["status"] == "awaiting_owner" and len(shared_posts()) == before,
+      f"conflicts/ as a file: the reply is answered and nothing changes ({handled})")
+
 # 25v. The absence rule itself: only a genuinely missing entry below a real, readable directory
 # is absent; a symlink, a wrong kind, a non-directory parent or a dangling link raises.
 scratch = root / "absence"
@@ -2185,6 +2222,7 @@ scratch.mkdir()
 (scratch / "link-to-file").symlink_to("file")
 (scratch / "dangling").symlink_to("missing")
 (scratch / "dangling-dir").symlink_to("missing-dir")
+(scratch / "link-dir").symlink_to("dir")
 rule = {
     "missing": guard.present(scratch / "missing") is False,
     "missing-chain": guard.present(scratch / "a" / "b" / "c.json") is False,
@@ -2196,6 +2234,7 @@ rule = {
     "dangling": raises_unknown(lambda: guard.present(scratch / "dangling")),
     "below-a-file": raises_unknown(lambda: guard.present(scratch / "file" / "x.json")),
     "below-dangling-dir": raises_unknown(lambda: guard.present(scratch / "dangling-dir" / "x.json")),
+    "below-linked-dir": raises_unknown(lambda: guard.present(scratch / "link-dir" / "x.json")),
     "entries-missing": guard.entries(scratch / "missing", "*") == [],
     "entries-file": raises_unknown(lambda: guard.entries(scratch / "file", "*")),
     "entries-dangling-dir": raises_unknown(lambda: guard.entries(scratch / "dangling-dir", "*")),

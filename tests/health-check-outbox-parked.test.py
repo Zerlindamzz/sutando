@@ -265,14 +265,16 @@ class WithheldReviewsReadable(unittest.TestCase):
 
     def test_a_symlinked_record_is_named(self):
         (self.base / "archive").mkdir()
-        (self.base / "archive" / "wr_0000000000000003.json").symlink_to("missing.json")
+        (self.base / "archive" / "real.json").write_text(json.dumps({"status": "kept_private"}))
+        (self.base / "archive" / "wr_0000000000000003.json").symlink_to("real.json")
         r = self.hc.check_withheld_reviews_readable(self.ws)
         self.assertEqual(r["status"], "warn")
         self.assertIn("archive/wr_0000000000000003.json", r["detail"])
 
     def test_the_check_is_registered(self):
         source = (REPO / "src" / "health-check.py").read_text()
-        self.assertIn("checks.append(check_withheld_reviews_readable())", source)
+        self.assertTrue("checks.append(check_withheld_reviews_readable())" in source,
+                        "check_withheld_reviews_readable is not registered")
 
 
 if __name__ == "__main__":
