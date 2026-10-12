@@ -1,0 +1,13 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..1ced482a6 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1035,7 +1035,7 @@ def _publish_review(path: Path, record: dict) -> bool:
+     if (read_item(core.backend.root, item_id) or {}).get("status") not in core.backend.TERMINAL:
+         core.deliver_one(item_id, payload)
+     item = read_item(core.backend.root, item_id) or {}
+-    if item.get("status") == "DELIVERED":
++    if False:
+         current = _reread_record(path)
+         if current.get("status") == "published":
+             return True

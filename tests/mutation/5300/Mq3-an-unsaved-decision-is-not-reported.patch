@@ -1,0 +1,13 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..97ceb6ef3 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1250,7 +1250,7 @@ def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | Non
+                 and not team_result_guard.decision_is_durable(current):
+             _log(f"withheld review {path.stem}: decision recorded, it acts once it is durable; "
+                  f"reply {task.get('id')} not applied again")
+-        elif current.get("status") == "awaiting_owner":
++        elif False:
+             _log(f"withheld review {path.stem}: decision could not be saved; reply "
+                  f"{task.get('id')} not applied, the owner can answer again")
+             _queue_review_control_result(task, body=(

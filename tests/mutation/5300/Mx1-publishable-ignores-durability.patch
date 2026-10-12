@@ -1,0 +1,13 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..ded7fa451 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -721,7 +721,7 @@ def withheld_claim_publishable(path: Path, claim_id) -> bool:
+         issued = _issued_claim(path, claim_id).is_file()
+     return (issued and record is not None and record.get("status") == "publish_pending"
+             and record.get("decision") == "false_positive"
+-            and record.get("decision_claim_id") == claim_id and decision_is_durable(record))
++            and record.get("decision_claim_id") == claim_id)
+ 
+ 
+ def decision_is_durable(record) -> bool:

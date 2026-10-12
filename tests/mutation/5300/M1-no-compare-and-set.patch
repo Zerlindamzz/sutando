@@ -1,0 +1,13 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..cfa941ebf 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -440,7 +440,7 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
+     except (OSError, ValueError):
+         return False
+     if (not isinstance(current, dict) or record.get(field) != current.get(field)
+-            or record_version(current) != expect):
++            ):
+         return False
+     record["generation"] = int(current.get("generation") or 0) + 1
+     temporary, replaced = None, False

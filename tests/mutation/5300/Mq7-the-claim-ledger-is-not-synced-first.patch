@@ -1,0 +1,12 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..e8daa0e4a 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -812,7 +812,6 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
+         ledger = _issued_claim(path, claim_id)
+         ledger.parent.mkdir(mode=0o700, exist_ok=True)
+         os.close(os.open(ledger, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+-        _fsync_directory(ledger.parent)  # the ledger entry is durable before the record names it
+         expect, landed = record_version(record), []
+         record.update(updates, decision_claim_id=claim_id, decision_durable=False)
+         if _write_owned_record(path, record, "withheld_body", expect, landed):

@@ -1,0 +1,13 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..403f7d419 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -801,7 +801,7 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
+     """Apply the owner's decision only to a record still awaiting it and owning its
+     id; None means it was already decided (or is gone), so the reply changes nothing."""
+     path = Path(path)
+-    with _ledger_lock(_record_directory(path)):
++    with contextlib.nullcontext():
+         record = _live_undecided_record(path)
+         if (record is None or record.get("status") != "awaiting_owner"
+                 or not _owns_its_id(path, "withheld_body")):

@@ -1,0 +1,13 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..eecf07524 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1082,7 +1082,7 @@ def _settle_landed_release(core: DeliveryCore, item_id: str, room: str) -> None:
+ 
+ 
+ def _requeue_command(root, item_id: str) -> str:
+-    return shlex.join(["python3", "src/outbox_cli.py", "--root", str(root), "requeue", item_id])
++    return f"python3 src/outbox_cli.py --root {root} requeue {item_id}"
+ 
+ 
+ def _reread_record(path: Path) -> dict:

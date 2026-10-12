@@ -1,0 +1,12 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..359093aaf 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -635,7 +635,6 @@ def _write_artifact(path: Path, payload: dict, field: str) -> bool:
+                 os.rename(temporary, path)
+             else:
+                 os.link(temporary, path)
+-            _fsync_directory(path.parent)
+         except FileExistsError:
+             pass
+         except OSError:

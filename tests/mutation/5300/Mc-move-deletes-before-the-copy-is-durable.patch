@@ -1,0 +1,14 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..75e0e4b28 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -473,8 +473,8 @@ def _durable_move(source: Path, target: Path) -> None:
+     """Move a record so its only copy is never deleted before the new one is durable:
+     link, sync the target directory, then unlink and sync the source directory."""
+     os.link(source, target)                              # no-clobber: an existing file stays
+-    _fsync_directory(target.parent)
+     os.unlink(source)
++    _fsync_directory(target.parent)
+     _fsync_directory(source.parent)
+ 
+ 

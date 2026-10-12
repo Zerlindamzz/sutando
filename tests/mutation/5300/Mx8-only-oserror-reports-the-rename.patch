@@ -1,0 +1,13 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..6222b4493 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -456,7 +456,7 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
+         os.replace(temporary, path)
+         replaced = True
+         _fsync_directory(path.parent)  # success is reported only once the rename is durable
+-    except Exception:  # noqa: BLE001 — any failure reports whether the rename happened
++    except OSError:
+         if landed is not None:
+             landed.append(replaced)  # whether the new record may be on disk
+         return False

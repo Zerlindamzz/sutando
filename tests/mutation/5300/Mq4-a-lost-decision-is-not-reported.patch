@@ -1,0 +1,13 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..89c5eeffb 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1242,7 +1242,7 @@ def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | Non
+         claimed = None
+     if claimed is None:
+         current = _read_private_json(path) or {}
+-        if team_result_guard.decision_lost(path):
++        if False:
+             _log(f"withheld review {path.stem}: an earlier decision was lost; reply "
+                  f"{task.get('id')} not applied, left for the owner")
+             _queue_review_control_result(task, body=_lost_decision_notice(path, current))

@@ -1,0 +1,13 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py b/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
+index 7696bb529..bd31ddc66 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
++++ b/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
+@@ -96,7 +96,7 @@ class AG2SpaceRoomMessageProvider:
+                 raise ProviderIndeterminate(f"gateway error for {item_id}: HTTP {e.code}") from e
+             if is_retryable_http_status(e.code, auth_recoverable=True):
+                 raise ProviderRefused(f"gateway refused {item_id} for now: HTTP {e.code}") from e
+-            raise ProviderPermanentRefused(f"gateway refused {item_id}: HTTP {e.code}") from e
++            raise ProviderIndeterminate(f"gateway refused {item_id}: HTTP {e.code}") from e
+         except (urllib.error.URLError, TimeoutError, OSError) as e:
+             raise ProviderIndeterminate(f"transport failure for {item_id}: {e}") from e
+         # An explicit refusal wins over any id the same response carries.

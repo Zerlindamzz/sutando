@@ -1,0 +1,14 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..cac6fd326 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1025,8 +1025,7 @@ def _publish_review(path: Path, record: dict) -> bool:
+         return _record_publish_failure(path, record, version, "invalid origin/body")
+     core, item_id = _withheld_outbox(), f"{record['review_id']}.{claim}"
+     landed = _reread_record(path)
+-    if (landed.get("decision_claim_id") == claim
+-            and isinstance(landed.get("release_event_id"), str) and landed["release_event_id"]):
++    if False:
+         # A recorded event id proves the release landed: settle, never send it again.
+         _settle_landed_release(core, item_id, room)
+         return _commit_landed(path, record, landed)

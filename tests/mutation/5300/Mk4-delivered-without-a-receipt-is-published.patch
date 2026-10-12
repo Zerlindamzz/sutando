@@ -1,0 +1,15 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..482dbe70a 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1040,8 +1040,8 @@ def _publish_review(path: Path, record: dict) -> bool:
+         if current.get("status") == "published":
+             return True
+         event_id = current.get("release_event_id")
+-        if isinstance(event_id, str) and event_id:
+-            return _commit_landed(path, record, current)
++        if True:
++            return _commit_publication(path, current, team_result_guard.record_version(current), "")
+         if f"no-receipt:{item_id}" not in _REFUSED_REVIEW_PUBLICATIONS:
+             _REFUSED_REVIEW_PUBLICATIONS.add(f"no-receipt:{item_id}")
+             _log(f"withheld review {path.stem}: the outbox marks the release delivered but no "

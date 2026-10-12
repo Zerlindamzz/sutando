@@ -1,0 +1,14 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..7739dc1d1 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -774,8 +774,7 @@ def _proven_superseded(path: Path, field: str) -> bool:
+         return False
+     digest = _record_digest(path, field)
+     return (archived_outcome(decision) is not None and digest != "unreadable"
+-            and digest == _record_digest(archived, field)
+-            and _issued_to(path, field) == digest)
++            and digest == _record_digest(archived, field))
+ 
+ 
+ def proven_superseded_record(path: Path, field: str = "withheld_body") -> bool:

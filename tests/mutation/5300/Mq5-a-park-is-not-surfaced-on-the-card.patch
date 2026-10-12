@@ -1,0 +1,13 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..6fd23512a 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1050,7 +1050,7 @@ def _publish_review(path: Path, record: dict) -> bool:
+     if item.get("status") == "PARKED":
+         if item.get("reason") in _DEFINITE_PUBLISH_FAILURES:
+             return _record_publish_failure(path, record, version, item.get("reason"))
+-        if not record.get("publish_parked"):
++        if False:
+             record.update({"publish_parked": str(item.get("reason")), "card_resolution_pending": True})
+             if not team_result_guard.update_record(path, record, expect=version):
+                 _stale_review_write(path, "parked publication")

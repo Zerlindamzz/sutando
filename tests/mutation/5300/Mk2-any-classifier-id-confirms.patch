@@ -1,0 +1,14 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py b/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
+index 7696bb529..bc5b7cdd1 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
++++ b/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
+@@ -105,8 +105,7 @@ class AG2SpaceRoomMessageProvider:
+             raise ProviderPermanentRefused(f"gateway declined {item_id}: {str(resp)[:200]}")
+         receipt = classify_response(200, resp, id_keys=("event_id",))
+         event_id = resp.get("event_id") if isinstance(resp, dict) else None
+-        if not (receipt.outcome is OutboxOutcome.CONFIRMED and isinstance(event_id, str)
+-                and event_id.startswith("$") and len(event_id.strip()) > 1):
++        if not receipt.outcome is OutboxOutcome.CONFIRMED:
+             raise ProviderIndeterminate(f"accepted without a Matrix event id for {item_id}")
+         try:
+             self._record_receipt(item_id, event_id)

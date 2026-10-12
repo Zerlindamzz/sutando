@@ -1,0 +1,17 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..f48713a48 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1235,11 +1235,7 @@ def _handle_hitl_action(task: dict):
+ 
+ def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | None":
+     # The first durable decision is final; a later or racing reply is closed and logged.
+-    try:
+-        claimed = team_result_guard.claim_withheld_decision(path, updates)
+-    except Exception as exc:  # noqa: BLE001 — a failed claim is reported, never escapes the beat
+-        _log(f"withheld review {path.stem}: claim failed ({exc})")
+-        claimed = None
++    claimed = team_result_guard.claim_withheld_decision(path, updates)
+     if claimed is None:
+         current = _read_private_json(path) or {}
+         if team_result_guard.decision_lost(path):

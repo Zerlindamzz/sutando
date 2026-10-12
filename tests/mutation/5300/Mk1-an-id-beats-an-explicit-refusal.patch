@@ -1,0 +1,15 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py b/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
+index 7696bb529..42f84a661 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
++++ b/packages/ag2-sparrow/ag2_sparrow/delivery_core/provider_ag2space.py
+@@ -99,10 +99,6 @@ class AG2SpaceRoomMessageProvider:
+             raise ProviderPermanentRefused(f"gateway refused {item_id}: HTTP {e.code}") from e
+         except (urllib.error.URLError, TimeoutError, OSError) as e:
+             raise ProviderIndeterminate(f"transport failure for {item_id}: {e}") from e
+-        # An explicit refusal wins over any id the same response carries.
+-        if isinstance(resp, dict) and (resp.get("ok") is False or resp.get("error")
+-                                       or resp.get("errcode")):
+-            raise ProviderPermanentRefused(f"gateway declined {item_id}: {str(resp)[:200]}")
+         receipt = classify_response(200, resp, id_keys=("event_id",))
+         event_id = resp.get("event_id") if isinstance(resp, dict) else None
+         if not (receipt.outcome is OutboxOutcome.CONFIRMED and isinstance(event_id, str)

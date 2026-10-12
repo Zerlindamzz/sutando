@@ -1,0 +1,13 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..36294aa87 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -483,7 +483,7 @@ def archive_record(path: Path, field: str = "withheld_body") -> bool:
+     lock, never over an existing decision and only for the body its id was
+     issued to: the id stays reserved, so it is never issued again."""
+     path = Path(path)
+-    with _ledger_lock(_record_directory(path)):
++    with contextlib.nullcontext():
+         if not path.is_file() or not _owns_its_id(path, field):
+             return False
+         archive = path.parent / "archive"

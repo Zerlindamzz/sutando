@@ -1,0 +1,13 @@
+diff --git a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+index 137cad5a4..4802992c9 100644
+--- a/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
++++ b/packages/ag2-sparrow/ag2_sparrow/remote_gateway_bridge.py
+@@ -1180,7 +1180,7 @@ def _defers_to_archive(path: Path) -> bool:
+ 
+ 
+ def _resolve_review_card(path: Path, record: dict) -> bool:
+-    if not team_result_guard.decision_is_durable(record) or _defers_to_archive(path):
++    if _defers_to_archive(path):
+         return False
+     version = team_result_guard.record_version(record)
+     answer = _edit_review_card(record)

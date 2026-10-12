@@ -1,0 +1,13 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..770efb2b3 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -425,7 +425,7 @@ def update_record(path: Path, record: dict, field: str = "withheld_body", *,
+     """Rewrite a live record under the ledger lock, only while it owns its id and is
+     still the version `expect` names: a stale snapshot never overwrites a newer one."""
+     path = Path(path)
+-    with _ledger_lock(_record_directory(path)):
++    with contextlib.nullcontext():
+         return _write_owned_record(path, record, field, expect)
+ 
+ 

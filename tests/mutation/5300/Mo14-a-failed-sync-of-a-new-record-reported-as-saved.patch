@@ -1,0 +1,13 @@
+diff --git a/src/policy/egress/result.py b/src/policy/egress/result.py
+index deac298d8..dfb581947 100644
+--- a/src/policy/egress/result.py
++++ b/src/policy/egress/result.py
+@@ -639,7 +639,7 @@ def _write_artifact(path: Path, payload: dict, field: str) -> bool:
+         except FileExistsError:
+             pass
+         except OSError:
+-            return False
++            pass
+         return _holds(path, field, payload[field])
+     finally:
+         try:
