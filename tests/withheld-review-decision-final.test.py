@@ -782,6 +782,118 @@ edits = card_edits_since(mark)
 check(not owed.exists() and len(edits) == 1 and "Published to the original room" in edits[0],
       f"stale Pending re-show: the next beat shows Published and clears the marker: {edits}")
 
+# 11d'. B shows Published while A's older Pending repair is in flight: B cannot discharge
+# the debt while A may still land, and A's edit lands last and keeps the card owed.
+bridge._STATE = root / "owed-late-stale"
+path, rid = new_review("task-owed-late")
+pending = dict(guard.claim_withheld_decision(path, dict(NO)))
+guard.update_record(path, dict(pending, card_resolution_pending=False),
+                    expect=guard.record_version(pending))
+guard.mark_card_owed(path)
+owed = path.parent / guard.CARD_OWED_DIR / path.stem
+
+
+def late_stale_edit(stale_record):
+    bridge._edit_review_card = real_edit
+    bridge._publish_review(path, json.loads(path.read_text()))
+    bridge._resolve_review_card(path, json.loads(path.read_text()))
+    stage["b_late"] = bridge._reshow_current_card(path)
+    stage["b_cleared"] = not owed.exists()
+    return real_edit(stale_record)
+
+
+mark = len(calls)
+bridge._edit_review_card = late_stale_edit
+try:
+    bridge._retry_owed_review_cards()
+finally:
+    bridge._edit_review_card = real_edit
+edits = card_edits_since(mark)
+check(stage.get("b_late") is False and stage.get("b_cleared") is False and owed.is_file()
+      and "pending" in edits[-1],
+      f"late stale repair: B leaves the debt while A is in flight, A lands last: {edits}")
+mark = len(calls)
+for _beat in range(3):
+    bridge._retry_owed_review_cards()
+edits = card_edits_since(mark)
+check(not owed.exists() and len(edits) == 1 and "Published to the original room" in edits[0],
+      f"late stale repair: one later edit shows Published, then nothing more: {edits}")
+
+# 11i. The class, per edit path: a stale edit lands after a newer outcome was shown. When
+# the path returns the card shows the authoritative outcome or is owed; a beat repairs it.
+def authority_text(path):
+    archived = path.parent / "archive" / path.name
+    return bridge._resolved_review_body(json.loads((archived if archived.exists() else path).read_text()))
+
+
+def drive_stale(label, run):
+    bridge._STATE = root / f"stale-path-{label}"
+    path, rid = new_review(f"task-stale-{label}")
+    pending = dict(guard.claim_withheld_decision(path, dict(NO)))
+    if label != "resolve":
+        guard.update_record(path, dict(pending, card_resolution_pending=False),
+                            expect=guard.record_version(pending))
+        pending = json.loads(path.read_text())
+    owed = path.parent / guard.CARD_OWED_DIR / path.stem
+
+    def newer_then_stale(stale_record):
+        bridge._edit_review_card = real_edit
+        bridge._publish_review(path, json.loads(path.read_text()))
+        bridge._resolve_review_card(path, json.loads(path.read_text()))
+        return real_edit(stale_record)
+
+    mark = len(calls)
+    bridge._edit_review_card = newer_then_stale
+    try:
+        run(path, pending)
+    finally:
+        bridge._edit_review_card = real_edit
+    edits = card_edits_since(mark)
+    check(owed.is_file() or edits[-1] == authority_text(path),
+          f"stale via {label}: the card is current or owed: {edits[-1:]}")
+    bridge._retry_withheld_reviews()
+    edits = card_edits_since(mark)
+    check(not owed.exists() and edits[-1] == authority_text(path),
+          f"stale via {label}: a beat leaves the card on the authoritative outcome: {edits[-1:]}")
+
+
+drive_stale("resolve", lambda path, rec: bridge._resolve_review_card(path, rec))
+drive_stale("reshow", lambda path, rec: bridge._reshow_current_card(path))
+drive_stale("owed-beat", lambda path, rec: (guard.mark_card_owed(path),
+                                            bridge._retry_owed_review_cards()))
+
+# 11j. Hand-off: an owed card on a live record pending its own card retry makes no edit
+# and clears; a record that moves between the read and the clear keeps it owed.
+bridge._STATE = root / "owed-handoff"
+path, rid = new_review("task-owed-handoff")
+guard.claim_withheld_decision(path, dict(YES))
+owed = path.parent / guard.CARD_OWED_DIR / path.stem
+mark = len(calls)
+check(bridge._reshow_current_card(path) is True and not owed.exists()
+      and card_edits_since(mark) == [], "hand-off: no edit, the marker is cleared")
+real_authority = guard.authoritative_review
+
+
+def authority_then_move(review):
+    seen = real_authority(review)
+    guard.authoritative_review = real_authority
+    current = json.loads(review.read_text())
+    guard.update_record(review, dict(current, owner_note="moved"),
+                        expect=guard.record_version(current))
+    return seen
+
+
+guard.authoritative_review = authority_then_move
+try:
+    moved = bridge._reshow_current_card(path)
+finally:
+    guard.authoritative_review = real_authority
+check(moved is False and owed.is_file(), "hand-off: a record that moved keeps the card owed")
+bridge._retry_withheld_reviews()
+edits = card_edits_since(mark)
+check(not owed.exists() and edits and all("Kept private" in e for e in edits),
+      f"hand-off: the next beat shows Kept private and the debt clears: {edits}")
+
 # 11e. A transient read failure of the archived outcome is no proof the card is current:
 # the marker stays and no edit is made until the record reads again.
 bridge._STATE = root / "owed-unreadable"
@@ -867,8 +979,8 @@ check(not owed.exists(), "overlapping repairs: the next beat repairs and clears 
 check(guard.card_owed_reviews(owed.parent.parent) == [],
       "a temp file left by a crashed mark is never listed as an owed card")
 
-# 11g'. Overlap where B succeeds first: B services the debt and clears its own marker, so
-# A's clear finds no marker it holds and reports nothing serviced.
+# 11g'. Overlapping repairs that show the same outcome: an in-flight edit of the current
+# outcome cannot make the card stale, so B discharges the debt and A owes nothing.
 bridge._STATE = root / "owed-overlap-b-wins"
 path, rid = new_review("task-owed-b-wins")
 claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
@@ -888,8 +1000,8 @@ try:
     a_result = bridge._reshow_current_card(path)
 finally:
     bridge._edit_review_card = real_edit
-check(stage.get("b_wins") is True and a_result is False and not owed.exists(),
-      f"B serviced first: B ({stage.get('b_wins')}) clears, A ({a_result}) clears nothing")
+check(stage.get("b_wins") is True and a_result is True and not owed.exists(),
+      f"same outcome both ways: B ({stage.get('b_wins')}) and A ({a_result}) leave nothing owed")
 
 # 11g''. A non-dict authority is not a readable outcome: the card stays owed, unedited.
 bridge._STATE = root / "owed-non-dict"
@@ -1118,6 +1230,280 @@ archived = path.parent / "archive" / path.name
 archived.parent.mkdir(exist_ok=True)
 archived.write_text("{not json")
 check(guard.archived_withheld_decision(path) == {}, "an unreadable archive reads as {}")
+bridge._STATE = root / "state"
+
+# 15. Lost reply: a stale resolve edit applies after the publication was shown and archived,
+# then its HTTP reply is lost. It may have landed, so the card stays owed until repaired.
+bridge._STATE = root / "lost-reply"
+path, rid = new_review("task-lost-reply")
+snapshot = dict(guard.claim_withheld_decision(path, dict(NO)))
+owed = path.parent / guard.CARD_OWED_DIR / path.stem
+
+
+def applied_then_lost(stale_record):
+    bridge._edit_review_card = real_edit
+    bridge._publish_review(path, json.loads(path.read_text()))
+    bridge._resolve_review_card(path, json.loads(path.read_text()))
+    real_edit(stale_record)
+    raise TimeoutError("reply lost after the edit applied")
+
+
+mark = len(calls)
+bridge._edit_review_card = applied_then_lost
+try:
+    bridge._resolve_review_card(path, snapshot)
+    raised = None
+except TimeoutError as exc:
+    raised = exc
+finally:
+    bridge._edit_review_card = real_edit
+edits = card_edits_since(mark)
+check(raised is not None and owed.is_file() and "pending" in edits[-1],
+      f"lost reply: the card is owed after a stale edit applied unacknowledged: {edits[-1:]}")
+mark = len(calls)
+bridge._retry_withheld_reviews()
+edits = card_edits_since(mark)
+check(owed.is_file() and edits and "Published to the original room" in edits[-1],
+      f"lost reply: a beat shows Published while the lost edit may still land: {edits}")
+horizon = guard.CARD_EDIT_HORIZON_S
+guard.CARD_EDIT_HORIZON_S = 0.0
+try:
+    bridge._retry_withheld_reviews()
+finally:
+    guard.CARD_EDIT_HORIZON_S = horizon
+edits = card_edits_since(mark)
+check(not owed.exists() and "Published to the original room" in edits[-1],
+      f"lost reply: past the horizon a confirmed edit discharges the debt: {edits[-1:]}")
+
+# 16. A landed POST is never sent again. The POST lands, a card resolver bumps the record,
+# and the reread fails: the publication is reconciled from the posted sentinel, no POST.
+for label, failing_reads in (("transient", 1), ("persistent", 99)):
+    bridge._STATE = root / f"posted-{label}"
+    path, rid = new_review(f"task-posted-{label}")
+    claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
+    real_read, reads_left = bridge._read_private_json, [failing_reads]
+
+    def failing_read(candidate, _path=path):
+        if candidate == _path and reads_left[0] > 0:
+            reads_left[0] -= 1
+            return None
+        return real_read(candidate)
+
+    def post_then_bump(method, url, payload=None, timeout=35, _path=path):
+        answer = fake_req(method, url, payload, timeout)
+        if url == "/v1/room" and payload.get("room_id") == SHARED and "bumped" not in stage:
+            stage["bumped"] = bridge._resolve_review_card(_path, json.loads(_path.read_text()))
+            bridge._read_private_json = failing_read
+        return answer
+
+    stage.pop("bumped", None)
+    before = len(shared_posts())
+    bridge._req = post_then_bump
+    try:
+        first = bridge._publish_review(path, claimed)
+    finally:
+        bridge._req, bridge._read_private_json = fake_req, real_read
+    for _beat in range(2):
+        bridge._retry_withheld_reviews()
+    _live, record = final_record(path)
+    check(stage.get("bumped") is True and first is (label == "transient")
+          and len(shared_posts()) - before == 1 and record["status"] == "published",
+          f"{label} unreadable reread: one POST, then published from the sentinel "
+          f"({len(shared_posts()) - before} posts, {record['status']})")
+
+# 16b. An unreadable posted sentinel never leads to a POST.
+bridge._STATE = root / "posted-unreadable"
+path, rid = new_review("task-posted-unreadable")
+claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
+sentinel = path.parent / guard.PUBLISHED_DIR / f"{path.stem}.json"
+sentinel.parent.mkdir(exist_ok=True)
+sentinel.write_text("{not json")
+before = len(shared_posts())
+check(bridge._publish_review(path, claimed) is False and len(shared_posts()) == before,
+      "an unreadable posted sentinel: no POST, the publication stays pending")
+
+# 17. Through the real poll loop: Yes is consumed and archived on one poll; a later No for the
+# same review on the next poll is answered with the archived outcome, never handed to chat.
+bridge._STATE = root / "states" / "later-reply"
+bridge._WITHHELD_CONTROL_DIR = bridge._STATE / "withheld-review-control-results"
+path, rid = new_review("task-later-reply")
+polls = [[decision("Yes", rid, "later-yes")], [decision("No", rid, "later-no")]]
+chat, alive = [], [True, True, False]
+
+
+def poll_req(method, url, payload=None, timeout=35):
+    if url.startswith("/v1/tasks?wait="):
+        return {"tasks": polls.pop(0) if polls else []}
+    return fake_req(method, url, payload, timeout)
+
+
+patched = {name: getattr(bridge, name) for name in (
+    "TOKEN", "URL", "time", "_acquire_singleton", "_load_inflight", "_recover_orphan_proactive",
+    "_maybe_start_event_channel", "_heartbeat_singleton", "_post_heartbeat", "_req",
+    "_write_task", "_post_task_ack", "_post_ready_results", "_post_proactive",
+    "_reconcile_abandoned", "_emit_gateway_status", "_save_inflight",
+    "_push_pool_advertisement", "refresh_routing")}
+bridge.TOKEN, bridge.URL, bridge.time = "secret", "http://relay.invalid", _Clock()
+bridge._acquire_singleton = lambda *a, **k: True
+bridge._load_inflight = lambda *a, **k: set()
+bridge._heartbeat_singleton = lambda *a, **k: alive.pop(0) if alive else False
+for _noop in ("_recover_orphan_proactive", "_maybe_start_event_channel", "_post_heartbeat",
+              "_post_task_ack", "_post_ready_results", "_post_proactive",
+              "_emit_gateway_status", "_save_inflight", "_push_pool_advertisement",
+              "refresh_routing"):
+    setattr(bridge, _noop, lambda *a, **k: None)
+bridge._reconcile_abandoned = lambda inflight, suspects, *a, **k: suspects
+bridge._write_task = lambda task: chat.append(task["id"]) or (task["id"], True)
+bridge._req = poll_req
+mark, before = len(calls), len(shared_posts())
+try:
+    bridge.main()
+finally:
+    for name, value in patched.items():
+        setattr(bridge, name, value)
+answers = {p["id"]: p["body"] for _m, u, p in calls[mark:] if u == "/v1/results"}
+archived = path.parent / "archive" / path.name
+check(chat == [] and polls == [], f"later reply: neither reply became chat ({chat}, {len(polls)} unpolled)")
+check(json.loads(archived.read_text())["status"] == "kept_private" and not path.exists()
+      and len(shared_posts()) == before,
+      "later reply: the first decision stands archived and nothing is published")
+check(answers.get("later-yes") == "[no-send]" and "Kept private" in answers.get("later-no", ""),
+      f"later reply: the No is answered with the archived outcome: {answers}")
+bridge._STATE = root / "state"
+bridge._WITHHELD_CONTROL_DIR = bridge._STATE / "withheld-review-control-results"
+
+# 18. Damaged ledger state never wedges a card: an unparsable debt marker is the oldest
+# debt, so the live card retry's confirmed edit discharges it.
+bridge._STATE = root / "damaged-marker"
+path, rid = new_review("task-damaged-marker")
+guard.claim_withheld_decision(path, dict(YES))
+owed_dir = path.parent / guard.CARD_OWED_DIR
+owed_dir.mkdir(exist_ok=True)
+(owed_dir / path.stem).write_text("not a number")
+mark = len(calls)
+bridge._retry_review_card_resolutions()
+check(not (owed_dir / path.stem).exists() and "Kept private" in card_edits_since(mark)[-1],
+      "an unparsable debt marker is discharged by the next confirmed edit")
+
+# 18c. A debt marker that cannot be read is never discharged: the confirmed edit leaves it,
+# and the first edit after it reads again discharges it.
+bridge._STATE = root / "unreadable-marker"
+path, rid = new_review("task-unreadable-marker")
+guard.claim_withheld_decision(path, dict(YES))
+owed_dir = path.parent / guard.CARD_OWED_DIR
+guard.mark_card_owed(path)
+os.chmod(owed_dir / path.stem, 0)
+try:
+    bridge._retry_review_card_resolutions()
+    kept = (owed_dir / path.stem).exists()
+finally:
+    os.chmod(owed_dir / path.stem, 0o600)
+bridge._retry_owed_review_cards()
+check(kept and not (owed_dir / path.stem).exists(),
+      "an unreadable debt marker stays until an edit can read it, then is discharged")
+
+# 18d. Hand-off whose marker no longer parses when the clear runs: the clear refuses.
+bridge._STATE = root / "handoff-garbled"
+path, rid = new_review("task-handoff-garbled")
+guard.claim_withheld_decision(path, dict(YES))
+real_authority = guard.authoritative_review
+
+
+def authority_then_garble(review):
+    seen = real_authority(review)
+    guard.authoritative_review = real_authority
+    (review.parent / guard.CARD_OWED_DIR / review.stem).write_text("garbled")
+    return seen
+
+
+guard.authoritative_review = authority_then_garble
+try:
+    garbled = bridge._reshow_current_card(path)
+finally:
+    guard.authoritative_review = real_authority
+check(garbled is False and (path.parent / guard.CARD_OWED_DIR / path.stem).exists(),
+      "hand-off: a marker that no longer parses is not cleared without an edit")
+
+# 18a. A mangled in-flight entry reads as expired: it is owed, and a repair clears it.
+bridge._STATE = root / "damaged-inflight"
+path, rid = new_review("task-damaged-inflight")
+claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
+bridge._publish_review(path, claimed)
+bridge._resolve_review_card(path, json.loads(path.read_text()))
+owed_dir = path.parent / guard.CARD_OWED_DIR
+(owed_dir / ".inflight").mkdir(parents=True, exist_ok=True)
+mangled = owed_dir / ".inflight" / f"{path.stem}.junk"
+mangled.write_text("{not json")
+check(guard.card_owed_reviews(path.parent) == [path], "a mangled in-flight entry is owed")
+mark = len(calls)
+bridge._retry_owed_review_cards()
+check(not (owed_dir / path.stem).exists() and not mangled.exists()
+      and "Published to the original room" in card_edits_since(mark)[-1],
+      "a mangled in-flight entry: one confirmed edit discharges it and clears the entry")
+
+# 18b. Hand-off whose debt was taken over by a newer mark between the read and the clear:
+# the clear refuses, and the newer debt stays for its owner.
+bridge._STATE = root / "handoff-taken-over"
+path, rid = new_review("task-handoff-over")
+guard.claim_withheld_decision(path, dict(YES))
+real_authority = guard.authoritative_review
+
+
+def authority_then_newer_mark(review):
+    seen = real_authority(review)
+    guard.authoritative_review = real_authority
+    stage["newer"] = guard.mark_card_owed(review)
+    return seen
+
+
+guard.authoritative_review = authority_then_newer_mark
+try:
+    taken = bridge._reshow_current_card(path)
+finally:
+    guard.authoritative_review = real_authority
+check(taken is False and (path.parent / guard.CARD_OWED_DIR / path.stem).read_text()
+      == str(stage["newer"]), "hand-off: a debt taken over by a newer mark is not cleared")
+
+# 19. A record that moved to another outcome while the POST was in flight is not
+# overwritten, and a record gone mid-POST is reported stale; neither POSTs again.
+for label in ("other-outcome", "gone"):
+    bridge._STATE = root / f"post-{label}"
+    path, rid = new_review(f"task-post-{label}")
+    claimed = dict(guard.claim_withheld_decision(path, dict(NO)))
+
+    def post_then_change(method, url, payload=None, timeout=35, _path=path, _label=label):
+        answer = fake_req(method, url, payload, timeout)
+        if url == "/v1/room" and payload.get("room_id") == SHARED and not stage.get(_label):
+            current = json.loads(_path.read_text())
+            if _label == "gone":
+                stage[_label] = guard.archive_record(_path)
+            else:
+                stage[_label] = guard.update_record(
+                    _path, dict(current, status="publish_failed", publish_error="concurrent"),
+                    expect=guard.record_version(current))
+        return answer
+
+    before = len(shared_posts())
+    bridge._req = post_then_change
+    try:
+        posted = bridge._publish_review(path, claimed)
+    finally:
+        bridge._req = fake_req
+    bridge._retry_pending_publications()
+    _live, record = final_record(path)
+    check(stage.get(label) is True and posted is False and len(shared_posts()) - before == 1
+          and record["status"] == ("publish_failed" if label == "other-outcome" else "publish_pending")
+          and any(path.stem in line and "publication not recorded" in line for line in logs),
+          f"{label} mid-POST: not overwritten, reported stale, one POST ({record['status']})")
+
+# 19b. A later reply that names a decided review in another room is not that review's.
+bridge._STATE = root / "archived-other-room"
+path, rid = new_review("task-archived-other-room")
+guard.claim_withheld_decision(path, dict(YES))
+bridge._resolve_review_card(path, json.loads(path.read_text()))
+elsewhere = {**decision("No", rid, "elsewhere-no"), "channel_id": "!another-room:example"}
+check(bridge._match_review_decision(elsewhere) is None,
+      "a reply from another room never matches a decided review")
 bridge._STATE = root / "state"
 
 builtins.open, io.open, os.open = _real_open, _real_io_open, _real_os_open

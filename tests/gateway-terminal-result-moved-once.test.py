@@ -1393,8 +1393,8 @@ class TerminalResultMovedOnce(unittest.TestCase):
 
     def test_invariant_an_archived_decision_is_immutable_and_a_conflicting_live_record_frozen(self):
         """Legacy state: B's decision archived and a stale live C under B's id (no
-        ledger). An owner reply to the old id never reaches C, C is frozen for the
-        owner, and B's archived decision survives every later archive."""
+        ledger). An owner reply to the old id is answered from B's archive and never
+        reaches C, C is frozen for the owner, and B's archived decision survives."""
         from ag2_sparrow import team_result_guard as trg
         hot = self.root / 'state' / trg.WITHHELD_RESULT_DIR
         old = trg.withheld_review_path(self.root / 'state', TID)
@@ -1406,7 +1406,9 @@ class TerminalResultMovedOnce(unittest.TestCase):
         self.bridge()
         task = {'user_id': '@owner:ag2.space', 'channel_id': '!ownerdm:ag2.space', 'task': f'Yes {old.stem}'}
         with patch.object(gw, '_tier_for', return_value='owner'):
-            self.assertIsNone(gw._match_review_decision(task), 'an owner reply to the old id matched C')
+            matched = gw._match_review_decision(task)
+        self.assertIsNotNone(matched, 'a reply to a decided review is answered, not dropped to chat')
+        self.assertEqual(matched[1]['withheld_body'], 'BODY-B', 'an owner reply to the old id matched C')
         self.assertEqual(gw._pending_review_records(), [])
         frozen = list((hot / 'conflicts').glob('*.json'))
         self.assertEqual([json.loads(p.read_text())['withheld_body'] for p in frozen], ['BODY-C'])

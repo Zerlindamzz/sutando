@@ -798,39 +798,162 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
 
 
 CARD_OWED_DIR = "card-owed"
+# An edit whose outcome is unknown may still land this long after it started.
+CARD_EDIT_HORIZON_S = 120.0
 
 
-def mark_card_owed(path: Path) -> str:
-    """Record, durably and under the ledger lock, that this review's card must be edited
-    again; returns the token this repair holds. A later mark takes the debt over."""
-    path = Path(path)
-    directory = _record_directory(path)
-    token = os.urandom(16).hex()
-    with _ledger_lock(directory):
-        owed = directory / CARD_OWED_DIR
-        owed.mkdir(mode=0o700, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=owed)
+def _fsync_directory(directory: Path) -> None:
+    if os.name != "nt":
+        fd = os.open(directory, os.O_RDONLY)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(token)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, owed / path.stem)
+            os.fsync(fd)
         finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-    return token
+            os.close(fd)
+
+
+def _atomic_text(target: Path, text: str) -> None:
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _owed_dir(path: Path) -> Path:
+    return _record_directory(path) / CARD_OWED_DIR
+
+
+def _next_card_seq(path: Path) -> int:
+    """The next number in the directory's card-edit order; the ledger lock is held."""
+    counter = _owed_dir(path) / ".seq"
+    try:
+        seq = int(counter.read_text(encoding="utf-8")) + 1
+    except (OSError, ValueError):
+        seq = 1
+    _atomic_text(counter, str(seq))
+    return seq
+
+
+def _write_owed_marker(path: Path) -> int:
+    """Owe this review's card from now on, whatever was owed before; lock held. The
+    marker holds its place in the edit order: only a later edit can discharge it."""
+    seq = _next_card_seq(path)
+    _atomic_text(_owed_dir(path) / path.stem, str(seq))
+    return seq
+
+
+def _inflight_entry(entry: Path) -> tuple:
+    """(started_at, shown digest) of an unsettled edit; unreadable reads as expired."""
+    try:
+        data = json.loads(entry.read_text(encoding="utf-8"))
+        return float(data["started_at"]), str(data["shown"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0, ""
+
+
+def _inflight(path: Path) -> list:
+    """(seq, started_at, shown digest, entry) for each edit of this review not yet settled."""
+    out = []
+    directory = _owed_dir(path) / ".inflight"
+    for entry in sorted(directory.glob(f"{path.stem}.*")) if directory.is_dir() else []:
+        try:
+            seq = int(entry.name.rsplit(".", 1)[1])
+        except (ValueError, IndexError):
+            seq = 0
+        out.append((seq, *_inflight_entry(entry), entry))
+    return out
+
+
+def mark_card_owed(path: Path) -> int:
+    """Record, durably and under the ledger lock, that this review's card must be edited
+    again; returns the debt's place in the edit order."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        return _write_owed_marker(path)
+
+
+def begin_card_edit(path: Path, shown: str) -> int:
+    """Register an edit about to be sent, and what it shows, before it is sent; returns its
+    place in the edit order. Until it settles, no later edit showing another outcome can
+    discharge the card's debt."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        seq = _next_card_seq(path)
+        _atomic_text(_owed_dir(path) / ".inflight" / f"{path.stem}.{seq}", json.dumps(
+            {"started_at": time.time(), "shown": _body_digest(shown)}))
+        return seq
+
+
+def _discharge(path: Path, seq: int, current: str) -> bool:
+    """Clear the card's debt for an edit `seq` that landed showing `current`, the current
+    outcome, unless an unsettled edit showing anything else may still land; lock held."""
+    marker = _owed_dir(path) / path.stem
+    if marker.exists():
+        try:
+            held = int(marker.read_text(encoding="utf-8"))
+        except ValueError:
+            held = 0  # a marker that does not parse is the oldest debt, never a newer one
+        except OSError:
+            return False
+        if held > seq:
+            return False
+    now, digest = time.time(), _body_digest(current)
+    entries = _inflight(path)
+    if any(other != seq and now - started < CARD_EDIT_HORIZON_S and shown != digest
+           for other, started, shown, _e in entries):
+        return False
+    for _seq, started, _shown, entry in entries:
+        if now - started >= CARD_EDIT_HORIZON_S:
+            entry.unlink(missing_ok=True)
+    marker.unlink(missing_ok=True)
+    _fsync_directory(marker.parent)
+    return True
+
+
+def finish_card_edit(path: Path, seq: int, shown: str, render, outcome: str) -> bool:
+    """Settle edit `seq`, which showed `shown`. `outcome` is landed, rejected (it did not
+    apply) or unknown (it may have applied). Re-read the authority under the ledger lock:
+    a landed edit of the current outcome discharges the debt when nothing older may still
+    land; one that may have landed showing anything else, or an unreadable authority,
+    owes the card again. Returns True when the card is known current and owes nothing."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        entry = _owed_dir(path) / ".inflight" / f"{path.stem}.{seq}"
+        if outcome != "unknown":
+            entry.unlink(missing_ok=True)
+        if outcome == "rejected":
+            return False
+        current = _authoritative(path)
+        if outcome == "unknown" or current is None or render(current[1]) != shown:
+            _write_owed_marker(path)
+            return False
+        return _discharge(path, seq, shown)
 
 
 def card_owed_reviews(directory: Path) -> list:
-    """The review paths whose card is owed an edit, as their live path names them."""
+    """The review paths whose card is owed an edit, as their live path names them: those
+    with a debt marker and those with an edit that never settled within the horizon."""
     directory = Path(directory)
     with _ledger_lock(directory):
         owed = directory / CARD_OWED_DIR
-        markers = sorted(owed.iterdir()) if owed.is_dir() else []
-        return [directory / f"{m.name}.json" for m in markers if not m.name.startswith(".")]
+        stems = {m.name for m in owed.iterdir() if not m.name.startswith(".")} \
+            if owed.is_dir() else set()
+        inflight, now = owed / ".inflight", time.time()
+        for entry in inflight.iterdir() if inflight.is_dir() else []:
+            stem = entry.name.rsplit(".", 1)[0]
+            started, _shown = _inflight_entry(entry)
+            if not entry.name.startswith(".") and now - started >= CARD_EDIT_HORIZON_S:
+                stems.add(stem)
+        return [directory / f"{stem}.json" for stem in sorted(stems)]
 
 
 def _authoritative(path: Path) -> "tuple | None":
@@ -853,22 +976,49 @@ def authoritative_review(path: Path) -> "tuple | None":
         return _authoritative(path)
 
 
-def clear_card_owed(path: Path, key, token: str) -> bool:
-    """Compare-and-delete: clear the owed card only while this repair still holds it and
-    the authority is still the version `key` names; anything else keeps it owed."""
+def clear_card_owed(path: Path, key, seq: int, render) -> bool:
+    """Discharge, with no edit made, the debt this repair recorded as `seq`, only while
+    the authority is still the version `key` names and nothing older may still land."""
     path = Path(path)
-    directory = _record_directory(path)
-    marker = directory / CARD_OWED_DIR / path.stem
-    with _ledger_lock(directory):
-        try:
-            held = marker.read_text(encoding="utf-8")
-        except OSError:
-            return False
+    with _ledger_lock(_record_directory(path)):
         current = _authoritative(path)
-        if held != token or current is None or current[0] != key:
+        if current is None or current[0] != key:
             return False
-        marker.unlink()
-        return True
+        marker = _owed_dir(path) / path.stem
+        try:
+            if int(marker.read_text(encoding="utf-8")) != seq:
+                return False
+        except (OSError, ValueError):
+            return False
+        return _discharge(path, seq, render(current[1]))
+
+
+PUBLISHED_DIR = "published"
+
+
+def record_publication(path: Path, claim_id, event_id: str, dedupe_key: str) -> None:
+    """Durable evidence, written under the ledger lock before anything else, that the
+    release POST for this claim landed; a POST is never sent again once it exists."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        _atomic_text(_record_directory(path) / PUBLISHED_DIR / f"{path.stem}.json", json.dumps(
+            {"claim_id": claim_id, "event_id": event_id, "dedupe_key": dedupe_key,
+             "posted_at": time.time()}, sort_keys=True))
+
+
+def publication_of(path: Path):
+    """The landed-POST evidence for this review: None when there is none, the record when
+    it reads, and the string "unreadable" when it exists but cannot be read."""
+    path = Path(path)
+    sentinel = _record_directory(path) / PUBLISHED_DIR / f"{path.stem}.json"
+    with _ledger_lock(_record_directory(path)):
+        if not sentinel.exists():
+            return None
+        try:
+            record = json.loads(sentinel.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "unreadable"
+    return record if isinstance(record, dict) else "unreadable"
 
 
 def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:

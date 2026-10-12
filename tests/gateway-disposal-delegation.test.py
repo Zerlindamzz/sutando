@@ -1149,6 +1149,16 @@ class BridgeDelegates(unittest.TestCase):
                  and isinstance(n.func, ast.Attribute) and n.func.attr in ("replace", "rename")]
         self.assertEqual(moves, [], "the bridge moves a review record itself")
 
+    def test_every_review_card_edit_is_settled(self):
+        """A review card is edited only through _show_review_card, which re-reads the
+        authority after the edit lands; no path edits a card without that settle."""
+        editors = {f.name for f in ast.walk(self.tree) if isinstance(f, ast.FunctionDef)
+                   and "_edit_review_card" in self.calls_in(f.name) and f.name != "_edit_review_card"}
+        self.assertEqual(editors, {"_show_review_card"})
+        self.assertTrue({"begin_card_edit", "finish_card_edit"} <= self.calls_in("_show_review_card"))
+        for path_fn in ("_defers_to_archive", "_resolve_review_card", "_reshow_current_card"):
+            self.assertIn("_show_review_card", self.calls_in(path_fn), path_fn)
+
     def test_a_reply_ruled_unsent_goes_through_the_delivery_guards(self):
         calls = self.calls_in("_quarantine_unsent")
         for guard in ("_owner_mention_disposition", "_guarded_result_body", "parse_markers"):
