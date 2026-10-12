@@ -1931,17 +1931,19 @@ check(raised is None and handled is True
 # copy beside a kept_private decision never posts. "emulated" reads unreadable as absent, as
 # Python 3.14's exists()/is_file()/is_dir() do, on any interpreter; "chmod" uses a real mode 000.
 @contextlib.contextmanager
-def unreadable_like_314(target):
+def unreadable_like_314(target, stat=True, listing=False):
     target = pathlib.Path(target)
-    real_stat = os.stat
+    real = {"stat": os.stat, "listdir": os.listdir, "scandir": os.scandir}
     swallowed = {name: getattr(pathlib.Path, name) for name in ("exists", "is_file", "is_dir")}
 
-    def blocked_stat(p, *args, **kwargs):
-        if isinstance(p, (str, bytes, os.PathLike)):
-            candidate = pathlib.Path(os.fsdecode(p))
-            if candidate == target or target in candidate.parents:
-                raise PermissionError(13, "Permission denied", os.fsdecode(p))
-        return real_stat(p, *args, **kwargs)
+    def refusing(name, inside):
+        def call(p=".", *args, **kwargs):
+            if isinstance(p, (str, bytes, os.PathLike)):
+                candidate = pathlib.Path(os.fsdecode(p))
+                if candidate == target or (inside and target in candidate.parents):
+                    raise PermissionError(13, "Permission denied", os.fsdecode(p))
+            return real[name](p, *args, **kwargs)
+        return call
 
     def reads_absent(real):
         def check(self, *args, **kwargs):
@@ -1951,15 +1953,18 @@ def unreadable_like_314(target):
                 return False
         return check
 
-    os.stat = blocked_stat
-    for name, real in swallowed.items():
-        setattr(pathlib.Path, name, reads_absent(real))
+    if stat:
+        os.stat = refusing("stat", inside=True)
+    if listing:
+        os.listdir, os.scandir = refusing("listdir", False), refusing("scandir", False)
+    for name, method in swallowed.items():
+        setattr(pathlib.Path, name, reads_absent(method))
     try:
         yield
     finally:
-        os.stat = real_stat
-        for name, real in swallowed.items():
-            setattr(pathlib.Path, name, real)
+        os.stat, os.listdir, os.scandir = real["stat"], real["listdir"], real["scandir"]
+        for name, method in swallowed.items():
+            setattr(pathlib.Path, name, method)
 
 
 @contextlib.contextmanager
@@ -2021,6 +2026,106 @@ for label, make_unreadable in variants:
         bridge._req = fake_req
     check(published is False and len(shared_posts()) == before,
           f"{label}: once readable, the kept-private decision still wins: no POST")
+
+# 25s. Each existence check on a decision path reads unknown as unknown, under the same 3.14
+# emulation (a refused stat, or a refused listing that glob() would read as empty).
+def raises_unknown(call):
+    try:
+        call()
+    except OSError:
+        return True
+    return False
+
+
+FIELD = "withheld_body"
+bridge._STATE = root / "site-contracts"
+path, rid = new_review("task-site-contracts")
+archive_dir = path.parent / "archive"
+archive_dir.mkdir(mode=0o700)
+(archive_dir / path.name).write_text(json.dumps({**json.loads(path.read_text()), **YES}))
+digest = guard._record_digest(path, FIELD)
+reservation = path.parent / "issued" / f"{path.stem}.issued"
+with unreadable_like_314(archive_dir):
+    site = {
+        "live-undecided": raises_unknown(lambda: guard._live_undecided_record(path)),
+        "owns-id": raises_unknown(lambda: guard._owns_its_id(path, FIELD)),
+        "archived-decision": guard.archived_withheld_decision(path) == {},
+        "record-of": raises_unknown(lambda: guard._record_of(path, digest, FIELD)),
+        "superseded": raises_unknown(lambda: guard._proven_superseded(path, FIELD)),
+        "bridge-archived-reply": raises_unknown(
+            lambda: bridge._archived_reply(path.with_name("wr_ffffffffffffffff.json"))),
+    }
+    try:
+        site["archive-refuses"] = guard.archive_record(path) is False and path.exists()
+    except Exception:  # noqa: BLE001
+        site["archive-refuses"] = False
+    saved_reservation = reservation.read_text()
+    reservation.unlink()
+    try:
+        site["issued-seeding"] = raises_unknown(lambda: guard._issued_to(path, FIELD))
+    finally:
+        reservation.write_text(saved_reservation)
+    real_match = bridge._match_review_decision
+    bridge._match_review_decision = lambda task: (path, json.loads(path.read_text()), "no")
+    try:
+        before = len(shared_posts())
+        site["handle-contains"] = (bridge._handle_review_decision(decision("No", rid, "site-handle"))
+                                   is True and "please reply again" in control_body("site-handle")
+                                   and len(shared_posts()) == before)
+    except Exception:  # noqa: BLE001
+        site["handle-contains"] = False
+    finally:
+        bridge._match_review_decision = real_match
+real_read = bridge._read_private_json
+bridge._read_private_json = lambda _path: None
+with unreadable_like_314(path):
+    site["reread"] = raises_unknown(lambda: bridge._reread_record(path))
+bridge._read_private_json = real_read
+with unreadable_like_314(path.parent, stat=False, listing=True):
+    site["freeze-scan"] = raises_unknown(lambda: guard.actionable_records(path.parent))
+fresh, _fresh_rid = new_review("task-site-claims")
+claims_dir = fresh.parent / "claims"
+claims_dir.mkdir(mode=0o700, exist_ok=True)
+claims_before = sorted(claims_dir.iterdir())
+with unreadable_like_314(claims_dir, stat=False, listing=True):
+    site["orphan-claim"] = raises_unknown(lambda: guard.claim_withheld_decision(fresh, dict(NO)))
+site["orphan-claim"] = (site["orphan-claim"] and sorted(claims_dir.iterdir()) == claims_before
+                        and json.loads(fresh.read_text())["status"] == "awaiting_owner")
+claimed_path, _claimed_rid = new_review("task-site-ledger")
+ledger_claim = guard.claim_withheld_decision(claimed_path, dict(NO))["decision_claim_id"]
+with unreadable_like_314(claimed_path.parent / "claims"):
+    site["claim-ledger"] = raises_unknown(
+        lambda: guard.withheld_claim_publishable(claimed_path, ledger_claim))
+check(all(site.values()), f"every decision-path existence check reads unknown as unknown: "
+                          f"{sorted(k for k, ok in site.items() if not ok)} did not")
+
+# 25t. A review record that reads but is not a record (archived, live, or frozen into
+# conflicts/) is unknown: the owner's reply is answered "please reply again", never ordinary work.
+MALFORMED = ("{not json", "[]", '"str"', "")
+for kind, content in enumerate(MALFORMED):
+    for where in ("archive", "live", "conflicts"):
+        label = f"malformed-{where}-{kind}"
+        bridge._STATE = root / label
+        path, rid = new_review(f"task-{label}")
+        if where == "archive":
+            bridge._handle_review_decision(decision("Yes", rid, f"{label}-decide"))
+            bridge._retry_withheld_reviews()
+            target = path.parent / "archive" / path.name
+        else:
+            target = path
+        target.write_text(content)
+        if where == "conflicts":
+            bridge._retry_withheld_reviews()  # the beat freezes the live file into conflicts/
+        frozen = sorted((path.parent / "conflicts").glob("*.json")) if where == "conflicts" else []
+        before = len(shared_posts())
+        try:
+            raised, handled = None, bridge._handle_review_decision(decision("No", rid, label))
+        except Exception as exc:  # noqa: BLE001
+            raised, handled = exc, None
+        check(raised is None and handled is True and "please reply again" in control_body(label)
+              and len(shared_posts()) == before and (where != "conflicts" or len(frozen) == 1),
+              f"{label}: a record that is not a record makes the reply unknown, answered "
+              f"(handled={handled}, raised={raised!r}, frozen={len(frozen)})")
 
 # 26. A reconcile that keeps failing stops re-editing the card after a bounded number of
 # tries, and says so once.

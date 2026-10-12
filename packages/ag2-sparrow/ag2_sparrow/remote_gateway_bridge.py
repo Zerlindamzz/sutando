@@ -940,6 +940,24 @@ def _review_paths(directory: Path, strict: bool) -> list[Path]:
         return []
 
 
+def _load_review(path: Path) -> dict:
+    """A review record, or _ReviewsUnreadable when it cannot be read or is not a record."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise _ReviewsUnreadable(f"{path.name}: {exc}") from exc
+    if not isinstance(record, dict):
+        raise _ReviewsUnreadable(f"{path.name}: not a review record")
+    return record
+
+
+def _check_reviews_readable(directory: Path) -> None:
+    # Archived records are loaded the same way where a reply is matched against them.
+    for folder in (directory, directory / "conflicts"):
+        for path in _review_paths(folder, strict=True):
+            _load_review(path)
+
+
 def _match_review_decision(task: dict) -> "tuple[Path, dict, str] | None":
     # Re-resolve the owner tier, require the private room, and bind bare Yes/No
     # to its review message. An explicit review id is still room-bound.
@@ -953,6 +971,7 @@ def _match_review_decision(task: dict) -> "tuple[Path, dict, str] | None":
     room = str(task.get("channel_id") or "")
     reply_to = str(task.get("reply_to_event") or "")
     candidates = []
+    _check_reviews_readable(_STATE / team_result_guard.WITHHELD_RESULT_DIR)
     for path, record in _pending_review_records(strict=True):
         if room != str(record.get("dm_room_id") or ""):
             continue
@@ -974,13 +993,8 @@ def _archived_review_candidates(room: str, task: dict, explicit_id, reply_to: st
     archive = _STATE / team_result_guard.WITHHELD_RESULT_DIR / "archive"
     found = []
     for archived in _review_paths(archive, strict=True):
-        try:
-            record = json.loads(archived.read_text(encoding="utf-8"))
-        except OSError as exc:
-            raise _ReviewsUnreadable(exc) from exc
-        except ValueError:
-            record = None
-        if (not isinstance(record, dict) or room != str(record.get("dm_room_id") or "")
+        record = _load_review(archived)
+        if (room != str(record.get("dm_room_id") or "")
                 or str(task.get("user_id") or "") != str(record.get("owner") or "")):
             continue
         if (explicit_id == record.get("review_id")
