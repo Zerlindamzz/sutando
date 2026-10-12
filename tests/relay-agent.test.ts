@@ -165,7 +165,7 @@ describe('relay agent: a work call waits until the user has finished speaking', 
 		await tick(120);
 		assert.equal(submitted.length, 1, 'one task');
 		assert.match(String(submitted[0].task), /^Summarize the PRs merged/);
-		assert.match(String(submitted[0].task), /cut off mid-sentence and are sent with it: "Check the activity in the Sutando repository/);
+		assert.match(String(submitted[0].task), /cut off mid-sentence: "Check the activity in the Sutando repository/);
 		assert.equal(relay.isWaiting('task-s1'), true, 'the later call waits for the result');
 		void second;
 	});
@@ -186,6 +186,23 @@ describe('relay agent: a work call waits until the user has finished speaking', 
 		}
 		await tick(50);
 		assert.deepEqual(submitted.map((a) => a.task), ['merged PRs this week', 'check PR 5302', 'check PR 5229', 'check PR 5167']);
+	});
+
+	it('a provider speech start (Gemini: one per transcription chunk, never an end) does not hold a request or merge the next', async () => {
+		// 2026-10-12 02:35: "check 5229" was held on a provider start that never ended; "check 5167" five seconds later was merged into it.
+		const { relay, speech, submitted } = agent();
+		speech.onUserSpeechStarted({ source: 'client-vad' });
+		speech.onUserSpeechEnded({ source: 'client-vad' });
+		speech.onUserSpeechStarted({ source: 'provider' }); // the transcription chunk arrives after the microphone went quiet
+		void relay.invoke('w', { task: 'check PR 5229' });
+		await tick(100);
+		assert.deepEqual(submitted.map((a) => a.task), ['check PR 5229'], 'submitted once the microphone has been quiet');
+		speech.onUserSpeechStarted({ source: 'client-vad' });
+		speech.onUserSpeechEnded({ source: 'client-vad' });
+		speech.onUserSpeechStarted({ source: 'provider' });
+		void relay.invoke('w', { task: 'check PR 5167' });
+		await tick(100);
+		assert.deepEqual(submitted.map((a) => a.task), ['check PR 5229', 'check PR 5167'], 'two requests, two tasks');
 	});
 
 	it('a request the user has finished is submitted once they have been quiet a moment', async () => {
@@ -574,6 +591,13 @@ describe('hand-off pacer: one result at a time, confirmed by the model\'s turn',
 		t.p.onTurnEnd(true);
 		assert.deepEqual(t.spoken, [['a']], 'said once is said');
 		assert.deepEqual(t.handed, ['a', 'b'], 'the next result goes; a is not handed over again');
+	});
+
+	it('a provider speech start does not hold a result (the pacer listens to the microphone only)', () => {
+		const t = pacer();
+		t.p.onUserSpeechStarted({ source: 'provider' });
+		t.p.submit(t.h('a'));
+		assert.deepEqual(t.handed, ['a'], 'not held');
 	});
 
 	it('a turn that ended before the hand-off does not confirm it', () => {

@@ -1407,8 +1407,8 @@ async function main() {
 	// tells the bridge whether a transcription may still be landing (no stamp within
 	// 10 s = the model started this turn itself, so the task write does not wait).
 	let lastUserSpeechAt: number | undefined;
-	session.eventBus.subscribe('speech.user_started', () => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechStarted(); });
-	session.eventBus.subscribe('speech.user_ended', () => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechEnded(); });
+	session.eventBus.subscribe('speech.user_started', (e: { source?: string }) => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechStarted(e); });
+	session.eventBus.subscribe('speech.user_ended', (e: { source?: string }) => { lastUserSpeechAt = Date.now(); speechGate.onUserSpeechEnded(e); });
 	session.eventBus.subscribe('response.first_audio', () => speechGate.onModelAudio());
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const speechHost = session as any;

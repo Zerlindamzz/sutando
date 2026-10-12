@@ -237,9 +237,15 @@ export const MAX_SUBMIT_HOLD_MS = 30_000;
  * turn is over once the user has been quiet a moment, or once the model has spoken to them: what the
  * user says after the model's reply is a new request, never the rest of this one.
  */
+/** A speech event's origin. Gemini's provider events mark a start on every transcription chunk and never an end. */
+export interface SpeechEvent { source?: string }
+
+/** Only the client's own microphone detection says when the user starts and stops: a provider start has no end. */
+export const fromClient = (e?: SpeechEvent): boolean => e?.source !== 'provider';
+
 export interface SpeechGate {
-	onUserSpeechStarted(): void;
-	onUserSpeechEnded(): void;
+	onUserSpeechStarted(e?: SpeechEvent): void;
+	onUserSpeechEnded(e?: SpeechEvent): void;
 	/** The model started speaking to the user. */
 	onModelAudio(): void;
 	/** Resolves once the user's turn is over, or the hold limit or `signal` ends the wait. */
@@ -258,8 +264,8 @@ export function createSpeechGate(opts: { quietMs?: number; maxHoldMs?: number; n
 	const waits = new Set<() => void>();
 	const wake = () => { for (const look of [...waits]) look(); };
 	return {
-		onUserSpeechStarted() { speaking = true; startedAt = now(); wake(); },
-		onUserSpeechEnded() { speaking = false; endedAt = now(); wake(); },
+		onUserSpeechStarted(e) { if (!fromClient(e)) return; speaking = true; startedAt = now(); wake(); },
+		onUserSpeechEnded(e) { if (!fromClient(e)) return; speaking = false; endedAt = now(); wake(); },
 		onModelAudio() { modelAudioAt = now(); wake(); },
 		waitTurnOver(signal) {
 			const since = now();
@@ -288,7 +294,7 @@ export function createSpeechGate(opts: { quietMs?: number; maxHoldMs?: number; n
 
 /** The request a cut-off call sent, joined to the one the user went on to say. */
 export function joinCutOffRequest(earlier: string, later: string): string {
-	return `${later}\n\n[The user's words just before this were cut off mid-sentence and are sent with it: "${earlier.replace(/"/g, "'")}". If they ask for something this does not cover, do that too.]`;
+	return `${later} (the user also said, just before, cut off mid-sentence: "${earlier.replace(/"/g, "'")}"; if that asks for something else, do it too)`;
 }
 
 /** One result on its way to the model. */
@@ -371,11 +377,13 @@ export function createHandoffPacer(deps: {
 			queue.push(h);
 			pump();
 		},
-		onUserSpeechStarted(): void {
+		onUserSpeechStarted(e?: SpeechEvent): void {
+			if (!fromClient(e)) return;
 			userSpeaking = true;
 			userStartedAt = now();
 		},
-		onUserSpeechEnded(): void {
+		onUserSpeechEnded(e?: SpeechEvent): void {
+			if (!fromClient(e)) return;
 			userSpeaking = false;
 			userEndedAt = now();
 			if (!current) pump();

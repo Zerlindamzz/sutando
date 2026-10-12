@@ -126,8 +126,9 @@ export function wireDurableChannels(session: VoiceSession, opts: DurableChannelO
 	const interruptedTurns = new Set<string>();
 	session.eventBus.subscribe('turn.start', () => pacer.onTurnStart());
 	session.eventBus.subscribe('response.first_audio', () => pacer.onModelAudio());
-	session.eventBus.subscribe('speech.user_started', () => pacer.onUserSpeechStarted());
-	session.eventBus.subscribe('speech.user_ended', () => pacer.onUserSpeechEnded());
+	// Only the client's microphone detection counts: Gemini marks a start on every transcription chunk and no end.
+	session.eventBus.subscribe('speech.user_started', (e: { source?: string }) => pacer.onUserSpeechStarted(e));
+	session.eventBus.subscribe('speech.user_ended', (e: { source?: string }) => pacer.onUserSpeechEnded(e));
 	session.eventBus.subscribe('turn.interrupted', (e: { turnId?: string }) => { if (e?.turnId) interruptedTurns.add(String(e.turnId)); });
 	session.eventBus.subscribe('turn.end', (e: { turnId?: string }) => {
 		pacer.onTurnEnd(!!e?.turnId && interruptedTurns.delete(String(e.turnId)));
