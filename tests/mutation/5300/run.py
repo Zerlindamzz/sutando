@@ -32,8 +32,12 @@ def run_tests(tree: Path, tests: list) -> list:
            "PYTHONDONTWRITEBYTECODE": "1"}
     results = []
     for test in tests:
-        done = subprocess.run([sys.executable, test], cwd=tree, env=env, capture_output=True,
-                              text=True, timeout=900)
+        try:
+            done = subprocess.run([sys.executable, test], cwd=tree, env=env, capture_output=True,
+                                  text=True, timeout=900)
+        except subprocess.TimeoutExpired:
+            results.append((test, "timeout", "FAIL: the run hung past 900s", False))  # a hang is caught
+            continue
         output = done.stdout + done.stderr
         first = next((line for line in output.splitlines() if line.startswith("FAIL")), "")
         results.append((test, done.returncode, first, any(word in output for word in INFRA)))

@@ -2466,7 +2466,9 @@ for label, fifo in fifos.items():
         outcomes[f"{label}-without-the-walk-check"] = bounded(lambda: guard.read_json_strict(fifo))
     finally:
         guard.present = real_present
-reported = {p for p, _reason in guard.namespace_problems(path.parent)}
+reported = set()
+outcomes["preflight"] = bounded(lambda: reported.update(p for p, _r in guard.namespace_problems(path.parent)))
+outcomes["preflight"] = "unknown" if outcomes["preflight"] == "read" else outcomes["preflight"]
 check(set(outcomes.values()) == {"unknown"} and set(fifos.values()) <= reported,
       f"a FIFO record is unknown and never hangs a read: {outcomes}")
 for fifo in fifos.values():
