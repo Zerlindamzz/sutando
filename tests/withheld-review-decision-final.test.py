@@ -2337,6 +2337,31 @@ def swapped_after_check(target):
 
 (scratch / "swap").write_text("{}")
 rule["swap-before-open"] = swapped_after_check(scratch / "swap")
+
+
+def directory_swapped_after_check():
+    """A directory on the way becomes a link between the walk and the open: refused too."""
+    namespace = scratch / guard.WITHHELD_RESULT_DIR
+    (namespace / "archive").mkdir(parents=True)
+    (namespace / "archive" / "wr_1.json").write_text("{}")
+    (scratch / "decoy").mkdir()
+    (scratch / "decoy" / "wr_1.json").write_text("{}")
+    target, real_present = namespace / "archive" / "wr_1.json", guard.present
+
+    def checked_then_swapped(path, kind=None):
+        answer = real_present(path, kind)
+        if pathlib.Path(path) == target:
+            (namespace / "archive").rename(namespace / "archive-moved")
+            (namespace / "archive").symlink_to(scratch / "decoy")
+        return answer
+    guard.present = checked_then_swapped
+    try:
+        return raises_unknown(lambda: guard.read_strict(target))
+    finally:
+        guard.present = real_present
+
+
+rule["directory-swap-before-open"] = directory_swapped_after_check()
 bridge._STATE = scratch
 review_link = scratch / "linked-review.json"
 review_link.symlink_to("dir/inner")

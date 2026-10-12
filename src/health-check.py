@@ -9766,20 +9766,10 @@ def check_withheld_reviews_readable(workspace_dir: Optional[Path] = None) -> dic
     except ImportError as exc:
         return {"name": name, "status": "warn", "detail": f"cannot load the review guard ({exc})"}
     base = workspace / "state" / guard.WITHHELD_RESULT_DIR
-    bad: list[str] = []
-    for folder in (base, base / "conflicts", base / "archive"):
-        try:
-            paths = guard.entries(folder, "wr_*.json")
-        except OSError:
-            bad.append(f"{folder.relative_to(workspace)}/ (a link, an odd entry or no access)")
-            continue
-        for path in paths:
-            try:
-                ok = isinstance(guard.read_json_strict(path), dict)
-            except (OSError, ValueError):
-                ok = False
-            if not ok:
-                bad.append(str(path.relative_to(workspace)))
+    bad = []
+    for path, reason in guard.namespace_problems(base):
+        shown = path.relative_to(workspace) if path.is_relative_to(workspace) else path.name
+        bad.append(f"{shown} ({reason})")
     if bad:
         shown = ", ".join(bad[:4]) + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else "")
         return {"name": name, "status": "warn",

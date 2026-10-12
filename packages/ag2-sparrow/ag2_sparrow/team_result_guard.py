@@ -439,9 +439,27 @@ def read_strict(path: Path) -> str:
     a missing file raises FileNotFoundError, anything else unknown raises OSError."""
     if not present(path, stat.S_IFREG):
         raise FileNotFoundError(2, "No such file or directory", str(path))
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+    with os.fdopen(_open_no_follow(path), "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def _open_no_follow(path: Path) -> int:
+    # Each directory from the namespace down is opened relative to the last and never through a
+    # link, so a directory swapped for a link after the walk is refused too.
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not hasattr(os, "O_DIRECTORY"):  # no dir_fd walk on this platform: the leaf alone
+        return os.open(path, os.O_RDONLY | nofollow)
+    path = path if isinstance(path, Path) else Path(path)
+    root = _namespace_root(path)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    try:
+        for name in path.relative_to(root).parts[:-1]:
+            step = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=fd)
+            os.close(fd)
+            fd = step
+        return os.open(path.name, os.O_RDONLY | nofollow, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def read_json_strict(path: Path):
@@ -451,11 +469,41 @@ def read_json_strict(path: Path):
 _NAMESPACES = (WITHHELD_RESULT_DIR, SUPPRESSED_RESULT_DIR)
 
 
+def _namespace_root(path: Path) -> Path:
+    return next((a for a in (path, *path.parents) if a.name in _NAMESPACES), path.parent)
+
+
+def namespace_problems(directory: Path) -> list:
+    """Read-only, no lock: each entry of a review namespace that a reader would refuse, as
+    (path, reason), across live records, archive/, conflicts/, claims/ and issued/."""
+    directory = directory if isinstance(directory, Path) else Path(directory)
+    problems = []
+    for folder, records in ((directory, True), (directory / "archive", True),
+                            (directory / "conflicts", True), (directory / "claims", False),
+                            (directory / "issued", False)):
+        try:
+            paths = entries(folder, "wr_*.json" if records else "*")
+        except OSError:
+            problems.append((folder, "a link, an odd entry or no access"))
+            continue
+        for path in paths:
+            try:
+                if not records:
+                    present(path)
+                elif not isinstance(read_json_strict(path), dict):
+                    problems.append((path, "not a JSON object"))
+            except OSError:
+                problems.append((path, "a link, an odd entry or no access"))
+            except ValueError:
+                problems.append((path, "not valid JSON"))
+    return problems
+
+
 def _walk(path) -> "int | None":
     # lstat each step from the record namespace (or the parent) down: a link is unknown, and so is
     # a file on the way (ENOTDIR); None only when genuinely absent below a real, readable directory.
     path = path if isinstance(path, Path) else Path(path)
-    root = next((a for a in (path, *path.parents) if a.name in _NAMESPACES), path.parent)
+    root = _namespace_root(path)
     steps = [root, *reversed([a for a in path.parents if root in a.parents]), path]
     for step in dict.fromkeys(steps):
         try:

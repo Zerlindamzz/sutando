@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import os
 import sys
 import tempfile
@@ -288,14 +289,44 @@ class WithheldReviewsReadable(unittest.TestCase):
                     finally:
                         target.unlink()
                     self.assertEqual(r["status"], "warn")
-                    self.assertIn(f"withheld-team-results/{folder}/", r["detail"])
+                    self.assertIn(f"state/withheld-team-results/{folder} (", r["detail"])
 
     def test_it_agrees_with_the_guard(self):
         source = (REPO / "src" / "health-check.py").read_text()
         body = source[source.index("def check_withheld_reviews_readable"):]
         body = body[:body.index("\ndef ")]
-        self.assertTrue("guard.entries(" in body and "guard.read_json_strict(" in body,
-                        "the health check must use the guard's own strict helpers")
+        self.assertTrue("guard.namespace_problems(" in body and "os.listdir" not in body
+                        and ".glob(" not in body and "read_text" not in body,
+                        "the health check must use the guard's own read-only preflight")
+
+    def test_linked_claims_or_issued_is_named(self):
+        for folder in ("claims", "issued"):
+            with self.subTest(folder=folder):
+                real = self.ws / f"{folder}-real"
+                real.mkdir()
+                (real / "wr_0000000000000005.c0ffee").write_text("")
+                target = self.base / folder
+                target.symlink_to(real)
+                try:
+                    r = self.hc.check_withheld_reviews_readable(self.ws)
+                finally:
+                    target.unlink()
+                self.assertEqual(r["status"], "warn")
+                self.assertIn(f"state/withheld-team-results/{folder} (", r["detail"])
+
+    def test_a_linked_entry_inside_claims_or_issued_is_named(self):
+        for folder in ("claims", "issued"):
+            with self.subTest(folder=folder):
+                inside = self.base / folder
+                inside.mkdir()
+                (self.ws / "elsewhere-file").write_text("")
+                (inside / "wr_0000000000000006.entry").symlink_to(self.ws / "elsewhere-file")
+                try:
+                    r = self.hc.check_withheld_reviews_readable(self.ws)
+                finally:
+                    shutil.rmtree(inside)
+                self.assertEqual(r["status"], "warn")
+                self.assertIn(f"{folder}/wr_0000000000000006.entry", r["detail"])
 
     def test_the_check_is_registered(self):
         source = (REPO / "src" / "health-check.py").read_text()
