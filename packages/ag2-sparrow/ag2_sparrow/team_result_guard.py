@@ -800,15 +800,28 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
 CARD_OWED_DIR = "card-owed"
 
 
-def mark_card_owed(path: Path) -> None:
-    """Record, durably and under the ledger lock, that this review's card may show a
-    superseded state and must be edited again from its current record."""
+def mark_card_owed(path: Path) -> str:
+    """Record, durably and under the ledger lock, that this review's card must be edited
+    again; returns the token this repair holds. A later mark takes the debt over."""
     path = Path(path)
     directory = _record_directory(path)
+    token = os.urandom(16).hex()
     with _ledger_lock(directory):
         owed = directory / CARD_OWED_DIR
         owed.mkdir(mode=0o700, exist_ok=True)
-        os.close(os.open(owed / path.stem, os.O_CREAT | os.O_WRONLY, 0o600))
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=owed)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, owed / path.stem)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    return token
 
 
 def card_owed_reviews(directory: Path) -> list:
@@ -816,14 +829,46 @@ def card_owed_reviews(directory: Path) -> list:
     directory = Path(directory)
     with _ledger_lock(directory):
         owed = directory / CARD_OWED_DIR
-        return [directory / f"{m.name}.json" for m in sorted(owed.iterdir())] if owed.is_dir() else []
+        markers = sorted(owed.iterdir()) if owed.is_dir() else []
+        return [directory / f"{m.name}.json" for m in markers if not m.name.startswith(".")]
 
 
-def clear_card_owed(path: Path) -> None:
+def _authoritative(path: Path) -> "tuple | None":
+    """(key, record) of the review's authority, its archive first; None when it cannot
+    be read or is absent. The key names the exact version shown. Lock held by caller."""
+    archived = _archived(path)
+    source, kind = (archived, "archive") if archived.exists() else (path, "live")
+    try:
+        record = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    return (kind, tuple(sorted(record_version(record).items()))), record
+
+
+def authoritative_review(path: Path) -> "tuple | None":
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        return _authoritative(path)
+
+
+def clear_card_owed(path: Path, key, token: str) -> bool:
+    """Compare-and-delete: clear the owed card only while this repair still holds it and
+    the authority is still the version `key` names; anything else keeps it owed."""
     path = Path(path)
     directory = _record_directory(path)
+    marker = directory / CARD_OWED_DIR / path.stem
     with _ledger_lock(directory):
-        (directory / CARD_OWED_DIR / path.stem).unlink(missing_ok=True)
+        try:
+            held = marker.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        current = _authoritative(path)
+        if held != token or current is None or current[0] != key:
+            return False
+        marker.unlink()
+        return True
 
 
 def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:

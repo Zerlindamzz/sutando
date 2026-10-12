@@ -982,13 +982,27 @@ def _publish_review(path: Path, record: dict) -> bool:
     }, timeout=20)
     if not isinstance(answer, dict) or not answer.get("ok"):
         return False
-    record.update({"status": "published", "published_at": time.time(),
-                   "published_event_id": str(answer.get("event_id") or ""),
-                   "card_resolution_pending": True})
-    if not team_result_guard.update_record(path, record, expect=version):
-        _stale_review_write(path, "publication")
-        return False
-    return True
+    landed = {"status": "published", "published_at": time.time(),
+              "published_event_id": str(answer.get("event_id") or ""),
+              "card_resolution_pending": True}
+    record.update(landed)
+    if team_result_guard.update_record(path, record, expect=version):
+        return True
+    # The POST landed: commit it onto the record's newer version so no beat posts again.
+    for _attempt in range(5):
+        current = _read_private_json(path) or {}
+        if current.get("status") == "published":
+            return True
+        if (current.get("status") != "publish_pending"
+                or current.get("decision_claim_id") != record.get("decision_claim_id")):
+            break
+        version = team_result_guard.record_version(current)
+        current.update(landed)
+        if team_result_guard.update_record(path, current, expect=version):
+            record.update(current)
+            return True
+    _stale_review_write(path, "publication")
+    return False
 
 
 def _resolved_review_body(record: dict) -> str:
@@ -1069,15 +1083,16 @@ def _resolve_review_card(path: Path, record: dict) -> bool:
 def _reshow_current_card(path: Path) -> bool:
     """A stale card edit may land after the edit for a newer state; show the current
     one again. The card stays owed, and is retried every beat, until an edit lands."""
-    team_result_guard.mark_card_owed(path)
-    archived = path.parent / "archive" / path.name
-    current = _read_private_json(archived if archived.is_file() else path)
+    token = team_result_guard.mark_card_owed(path)
+    shown = team_result_guard.authoritative_review(path)
+    if shown is None:
+        return False  # unreadable or absent is no proof the card is current
+    key, current = shown
     # A live record still pending its card is the live retry's to edit.
-    if current and (archived.is_file() or not current.get("card_resolution_pending")):
+    if key[0] == "archive" or not current.get("card_resolution_pending"):
         if _edit_review_card(current) is None:
             return False
-    team_result_guard.clear_card_owed(path)
-    return True
+    return team_result_guard.clear_card_owed(path, key, token)
 
 
 def _handle_hitl_action(task: dict):
