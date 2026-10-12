@@ -38,9 +38,11 @@ top of that. Remove the directory and the engine boots, types and tests unchange
   `results/proactive-result-<task>-<ts>.to-ag2space.txt` with `[channel: <room>]` first.
 - **In-flight work** keeps the origin and recent context from when the `work` call
   began, including across a room switch or disconnect/reconnect. A pending
-  transcription is omitted if the origin, provider, or logical session changes;
-  the new session's words never fill that old task. Delivery still re-checks the
-  original room's membership and honors `[dm-only]`.
+  transcription is omitted if the room changes, the turns provider is replaced,
+  or the client disconnects; the new session's words never fill that old task.
+  Re-announcing the room already bound, and a spoken farewell ("research X, bye"),
+  change none of these, so the owner's words for that task are kept. Delivery
+  still re-checks the original room's membership and honors `[dm-only]`.
 - **Prompt**: a `ROOM:` context line while docked, and one system notice per actual
   room change.
 - **`navigate.ts` / `navigate-protocol.ts`** — the `navigate_ui` tool ("let's talk in my

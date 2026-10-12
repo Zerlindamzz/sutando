@@ -1277,7 +1277,8 @@ export function logConversation(role: string, text: string, sessionId?: string):
  *  The `SESSION_END` sentinel is unique so the reader can locate
  *  it without regex gymnastics. */
 export function logSessionBoundary(reason: string = 'user_goodbye'): void {
-	_voiceContextRevision++;
+	// A farewell is said inside the session ("research X, bye"): words still landing stay with
+	// that task. The client leaving afterwards closes the window (endVoiceClientSession).
 	const line = `${new Date().toISOString()}|SESSION_END|${reason}\n`;
 	try { appendFileSync(CONVERSATION_LOG, line); } catch { /* best effort */ }
 	recordSessionBoundary(reason); // #603 sqlite mirror

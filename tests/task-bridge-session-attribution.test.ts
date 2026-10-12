@@ -177,17 +177,29 @@ describe('a voice task retains the context that invoked it', () => {
 		assert.doesNotMatch(taskBody(taskId), /replacement session|--- spoken/);
 	});
 
-	it('a logical session boundary invalidates late words even when the provider is reused', { timeout: 5000 }, async () => {
+	it('a farewell in the same breath keeps the owner\'s words; the client leaving after it drops later ones', { timeout: 5000 }, async () => {
 		const speech = pendingTranscript();
 		setVoiceSessionOrigin(origin('session-room'));
 		setVoiceTurnsProvider(speech.provider);
-		const pending = delegate('work before goodbye');
+		const pending = delegate('research the venue options');
 		await speech.read;
-		logSessionBoundary('test-goodbye');
-		speech.setInput('words after goodbye');
+		logSessionBoundary('voice_goodbye');
+		speech.setInput('research the venue options, bye');
 		const { taskId } = await pending;
 		await assertOrigin(taskId, 'session-room');
-		assert.doesNotMatch(taskBody(taskId), /words after goodbye|--- spoken/);
+		assert.match(taskBody(taskId), /--- spoken[\s\S]*user: research the venue options, bye/);
+
+		const late = pendingTranscript();
+		setVoiceSessionOrigin(origin('session-room'));
+		setVoiceTurnsProvider(late.provider);
+		const next = delegate('work asked just before the client closes');
+		await late.read;
+		logSessionBoundary('voice_goodbye');
+		endVoiceClientSession();
+		late.setInput('words after the client left');
+		const closed = await next;
+		await assertOrigin(closed.taskId, 'session-room');
+		assert.doesNotMatch(taskBody(closed.taskId), /words after the client left|--- spoken/);
 	});
 
 	it('a task begun with no origin does not acquire one during the wait', { timeout: 5000 }, async () => {
