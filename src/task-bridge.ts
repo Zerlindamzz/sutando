@@ -1070,12 +1070,6 @@ export const workTool: ToolDefinition = {
 			timeout_minutes?: number;
 			dm_on_timeout?: boolean;
 		};
-		// Read before the first await: the task belongs to the origin, and the words, it was
-		// asked from, even if the session moves or the adapter mutates its record meanwhile.
-		const origin = _voiceSessionOrigin ? { ..._voiceSessionOrigin, headers: { ..._voiceSessionOrigin.headers } } : null;
-		const turns = captureVoiceTurns();
-		let recentAtAsk = '';
-		try { recentAtAsk = getRecentConversation(4); } catch { /* best effort */ }
 
 		// Redirect pure screen-viewing tasks to inline tools (faster, no round-trip)
 		// Narrow match: only "describe/look at my screen" — not scroll, screenshot,
@@ -1084,6 +1078,13 @@ export const workTool: ToolDefinition = {
 		if (screenViewOnly.test(task)) {
 			return { status: 'rejected', message: 'Use describe_screen inline tool directly for screen viewing.' };
 		}
+
+		// Read before the first await: the task belongs to the origin, and the words, it was
+		// asked from, even if the session moves or the adapter mutates its record meanwhile.
+		const origin = _voiceSessionOrigin ? { ..._voiceSessionOrigin, headers: { ..._voiceSessionOrigin.headers } } : null;
+		const turns = captureVoiceTurns();
+		let recentAtAsk = '';
+		try { recentAtAsk = getRecentConversation(4); } catch { /* best effort */ }
 
 		// Fast path: handle known patterns inline for ~3s vs ~15s via file bridge.
 		// Same pattern as conversation-server's tryFastPath.
