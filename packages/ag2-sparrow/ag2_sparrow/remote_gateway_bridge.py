@@ -890,11 +890,11 @@ class _ReviewsUnreadable(Exception):
         self.reason = reason  # plain words for the owner; never a host path
 
 
-def _pending_review_records(strict: bool = False) -> list[tuple[Path, dict]]:
+def _pending_review_records() -> list[tuple[Path, dict]]:
     """Live reviews that own their id; the guard freezes any that conflict with
     their id's reservation or archived decision, and the owner is told."""
     directory = _STATE / team_result_guard.WITHHELD_RESULT_DIR
-    for path in _review_paths(directory, strict):
+    for path in _review_paths(directory, False):
         try:
             if team_result_guard.proven_superseded_record(path):
                 _defers_to_archive(path)
@@ -902,9 +902,7 @@ def _pending_review_records(strict: bool = False) -> list[tuple[Path, dict]]:
             continue
     try:
         actionable, frozen = team_result_guard.actionable_records(directory)
-    except OSError as exc:
-        if strict:
-            raise _ReviewsUnreadable(exc) from exc
+    except OSError:
         return []
     for path in frozen:
         _log(f"withheld review {path.name}: conflicts with its id's decision or reservation; "
@@ -993,7 +991,7 @@ def _match_review_decision(task: dict) -> "tuple[Path, dict, str] | None":
     reply_to = str(task.get("reply_to_event") or "")
     candidates = []
     _check_reviews_readable(_STATE / team_result_guard.WITHHELD_RESULT_DIR)
-    for path, record in _pending_review_records(strict=True):
+    for path, record in _pending_review_records():
         if room != str(record.get("dm_room_id") or ""):
             continue
         if str(task.get("user_id") or "") != str(record.get("owner") or ""):

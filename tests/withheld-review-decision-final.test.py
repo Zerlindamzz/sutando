@@ -2269,6 +2269,7 @@ scratch.mkdir()
 (scratch / "dangling").symlink_to("missing")
 (scratch / "dangling-dir").symlink_to("missing-dir")
 (scratch / "link-dir").symlink_to("dir")
+(scratch / "dir" / "inner").write_text("{}")
 rule = {
     "missing": guard.present(scratch / "missing") is False,
     "missing-chain": guard.present(scratch / "a" / "b" / "c.json") is False,
@@ -2281,6 +2282,9 @@ rule = {
     "below-a-file": raises_unknown(lambda: guard.present(scratch / "file" / "x.json")),
     "below-dangling-dir": raises_unknown(lambda: guard.present(scratch / "dangling-dir" / "x.json")),
     "below-linked-dir": raises_unknown(lambda: guard.present(scratch / "link-dir" / "x.json")),
+    "namespace-below-linked-dir": raises_unknown(
+        lambda: guard.present(scratch / "link-dir" / guard.WITHHELD_RESULT_DIR / "x.json")),
+    "read-below-linked-dir": raises_unknown(lambda: guard.read_strict(scratch / "link-dir" / "inner")),
     "entries-missing": guard.entries(scratch / "missing", "*") == [],
     "entries-file": raises_unknown(lambda: guard.entries(scratch / "file", "*")),
     "entries-dangling-dir": raises_unknown(lambda: guard.entries(scratch / "dangling-dir", "*")),
@@ -2293,6 +2297,32 @@ if os.geteuid() != 0:
         rule["below-unreadable"] = raises_unknown(lambda: guard.present(scratch / "closed" / "x"))
     finally:
         os.chmod(scratch / "closed", 0o700)
+
+
+def swapped_after_check(target):
+    """The leaf becomes a link between the walk and the open: the open itself refuses it."""
+    real_present = guard.present
+
+    def checked_then_swapped(path, kind=None):
+        answer = real_present(path, kind)
+        if pathlib.Path(path) == target:
+            target.unlink()
+            target.symlink_to("file")
+        return answer
+    guard.present = checked_then_swapped
+    try:
+        return raises_unknown(lambda: guard.read_strict(target))
+    finally:
+        guard.present = real_present
+
+
+(scratch / "swap").write_text("{}")
+rule["swap-before-open"] = swapped_after_check(scratch / "swap")
+bridge._STATE = scratch
+review_link = scratch / "linked-review.json"
+review_link.symlink_to("dir/inner")
+rule["bridge-review-reader"] = bridge._read_review_json(review_link) is None
+bridge._STATE = root / "state"
 check(all(rule.values()), f"the absence rule: {sorted(k for k, ok in rule.items() if not ok)} broke")
 
 # 25t. A review record that reads but is not a record (archived, live, or frozen into

@@ -452,8 +452,8 @@ _NAMESPACES = (WITHHELD_RESULT_DIR, SUPPRESSED_RESULT_DIR)
 
 
 def _walk(path) -> "int | None":
-    # lstat each step from the record namespace (or the parent) down: a link or a non-directory
-    # on the way is unknown; None only when genuinely absent below a real, readable directory.
+    # lstat each step from the record namespace (or the parent) down: a link is unknown, and so is
+    # a file on the way (ENOTDIR); None only when genuinely absent below a real, readable directory.
     path = path if isinstance(path, Path) else Path(path)
     root = next((a for a in (path, *path.parents) if a.name in _NAMESPACES), path.parent)
     steps = [root, *reversed([a for a in path.parents if root in a.parents]), path]
@@ -463,8 +463,8 @@ def _walk(path) -> "int | None":
         except FileNotFoundError:
             _absent(step)
             return None
-        if stat.S_ISLNK(mode) or (step != path and not stat.S_ISDIR(mode)):
-            raise OSError(f"{step}: {'a symlink' if stat.S_ISLNK(mode) else 'not a directory'}")
+        if stat.S_ISLNK(mode):
+            raise OSError(f"{step}: a symlink")
     return mode
 
 
