@@ -527,13 +527,29 @@ def _walk(path) -> "int | None":
     steps = [root, *reversed([a for a in path.parents if root in a.parents]), path]
     for step in dict.fromkeys(steps):
         try:
-            mode = os.lstat(step).st_mode
+            status = os.lstat(step)
         except FileNotFoundError:
             _absent(step)
             return None
-        if stat.S_ISLNK(mode):
-            raise OSError(f"{step}: a symlink")
+        mode = status.st_mode
+        if stat.S_ISLNK(mode) or getattr(status, "st_file_attributes", 0) & _REPARSE_POINT:
+            raise OSError(f"{step}: a symlink or junction")
     return mode
+
+
+_REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT: a Windows junction is not S_ISLNK
+
+
+def _still_at(fd: int, directory: Path) -> bool:
+    """The held directory is still the one at its path in the namespace: no link on the way,
+    and the same device and inode as the fd. A rename or rebind after the open fails this."""
+    try:
+        if not present(directory, stat.S_IFDIR):
+            return False
+        held, there = os.fstat(fd), os.lstat(directory)
+    except OSError:
+        return False  # unknown is not "still there"
+    return (held.st_dev, held.st_ino) == (there.st_dev, there.st_ino)
 
 
 def _absent(path: Path) -> None:
@@ -638,8 +654,16 @@ def _durable_move(source: Path, target: Path) -> None:
             os.link(source.name, target.name, src_dir_fd=source_fd, dst_dir_fd=target_fd,
                     follow_symlinks=False)               # no-clobber: an existing file stays
             _fsync_fd(target_fd)                         # the directory linked into, by fd, not name
+            if not (_still_at(target_fd, target.parent) and _still_at(source_fd, source.parent)):
+                os.unlink(target.name, dir_fd=target_fd)  # rebound after the open: undo, keep the source
+                raise OSError(f"{target.parent}: moved after it was opened; the record stays")
             os.unlink(source.name, dir_fd=source_fd)
             _fsync_fd(source_fd)
+            if not _still_at(target_fd, target.parent):    # rebound between the check and the unlink
+                os.link(target.name, source.name, src_dir_fd=target_fd, dst_dir_fd=source_fd,
+                        follow_symlinks=False)
+                os.unlink(target.name, dir_fd=target_fd)
+                raise OSError(f"{target.parent}: moved during the move; the record was put back")
         finally:
             os.close(target_fd)
     finally:

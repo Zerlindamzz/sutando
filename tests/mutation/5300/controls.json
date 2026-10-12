@@ -140,6 +140,30 @@
    "file": "src/policy/egress/result.py",
    "old": "    flags = (os.O_RDONLY | getattr(os, \"O_NOFOLLOW\", 0) | getattr(os, \"O_NONBLOCK\", 0)\n             | getattr(os, \"O_CLOEXEC\", 0))",
    "new": "    flags = os.O_RDONLY | getattr(os, \"O_NOFOLLOW\", 0)\n    _regular_only = lambda fd: fd  # noqa: E731"
+  },
+  {
+   "name": "the move does not re-verify the held folders before the unlink",
+   "file": "src/policy/egress/result.py",
+   "old": "            if not (_still_at(target_fd, target.parent) and _still_at(source_fd, source.parent)):\n                os.unlink(target.name, dir_fd=target_fd)  # rebound after the open: undo, keep the source\n                raise OSError(f\"{target.parent}: moved after it was opened; the record stays\")\n",
+   "new": ""
+  },
+  {
+   "name": "the move does not re-verify after the unlink",
+   "file": "src/policy/egress/result.py",
+   "old": "            if not _still_at(target_fd, target.parent):    # rebound between the check and the unlink",
+   "new": "            if False:"
+  },
+  {
+   "name": "a failed re-verification raises past the undo",
+   "file": "src/policy/egress/result.py",
+   "old": "    except OSError:\n        return False  # unknown is not \"still there\"",
+   "new": "    except ZeroDivisionError:\n        return False"
+  },
+  {
+   "name": "the walk accepts a Windows junction",
+   "file": "src/policy/egress/result.py",
+   "old": "        if stat.S_ISLNK(mode) or getattr(status, \"st_file_attributes\", 0) & _REPARSE_POINT:",
+   "new": "        if stat.S_ISLNK(mode):"
   }
  ]
 }

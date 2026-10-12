@@ -73,7 +73,10 @@ def main() -> int:
                 if control["file"] == CANONICAL:
                     (tree / VENDORED).write_text(original, encoding="utf-8")
             killed = [r for r in failed if not r[3]]
-            verdict = "KILLED" if killed else ("INVALID" if failed else "SURVIVED")
+            if any(r[3] for r in failed):
+                verdict = "INVALID"  # any syntax or import failure, even beside a behavioural one
+            else:
+                verdict = "KILLED" if killed else "SURVIVED"
             detail = f"{Path(killed[0][0]).name}: {killed[0][2] or 'exit ' + str(killed[0][1])}" \
                 if killed else ""
             print(f"{verdict:8} {control['name']} | {detail[:140]}")

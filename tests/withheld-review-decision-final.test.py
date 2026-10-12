@@ -2359,8 +2359,8 @@ for label in ("suppressed", "quarantined"):
     check(refused and not any(outside.iterdir()) and outside.stat().st_mode & 0o777 == 0o755,
           f"journal-{label}: a linked suppression namespace is refused, nothing written outside")
 
-# The move syncs the folder it linked into by fd, before the unlink: with that folder swapped right
-# after the link, the replacement is never the one synced.
+# The move syncs the folder it linked into by fd; with that folder swapped right after the link, the
+# rebind is caught: the copy is removed, the record stays, and the replacement is never synced.
 bridge._STATE = root / "move-sync-by-fd"
 path, rid = new_review("task-move-sync-by-fd")
 guard.claim_withheld_decision(path, dict(YES))
@@ -2393,10 +2393,10 @@ try:
 finally:
     os.link, os.unlink, guard._fsync_fd = real_link, real_unlink, real_fd_sync
 replacement_inode = os.stat(archive_dir).st_ino
-unlinked_at = events.index(("unlink", None)) if ("unlink", None) in events else -1
-check(moved is True and ("sync", original_inode) in events[:max(unlinked_at, 0)]
-      and ("sync", replacement_inode) not in events,
-      f"the move syncs the folder it linked into, by fd, before the unlink: {events}")
+linked_into = archive_dir.with_name("archive-linked-into")
+check(moved is False and path.is_file() and not any(linked_into.iterdir())
+      and ("sync", original_inode) in events and ("sync", replacement_inode) not in events,
+      f"a folder rebound after the link: the record stays, nothing left behind: {events}")
 
 # The move links the verified entry itself, never what a link swapped in for it points to.
 bridge._STATE = root / "move-no-follow"
@@ -2473,6 +2473,102 @@ check(set(outcomes.values()) == {"unknown"} and set(fifos.values()) <= reported,
       f"a FIFO record is unknown and never hangs a read: {outcomes}")
 for fifo in fifos.values():
     fifo.unlink()
+
+# Kewei's schedule through the real retry beat: the already-open archive/superseded/ is renamed
+# outside and its name replaced by a link just before the fd-relative link. Nothing escapes.
+bridge._STATE = root / "write-superseded-rebound"
+directory = bridge._STATE / "withheld-team-results"
+outside = root / "outside-superseded-rebound"
+outside.mkdir()
+(directory / "archive" / "superseded").mkdir(parents=True)
+(directory / "archive" / "wr_0000000000000000.json").write_text(
+    json.dumps({**base_record, **YES, "dm_event_id": "$superseded-rebound"}))
+live = directory / "wr_0000000000000000.json"
+live.write_text(json.dumps({**base_record, **NO, "dm_event_id": "$superseded-rebound"}))
+before_bytes, before, real_link, real_unlink = live.read_bytes(), len(shared_posts()), os.link, os.unlink
+source_unlinks = []
+
+
+def spy_source_unlink(name, *args, **kwargs):
+    if str(name).endswith(live.name):
+        source_unlinks.append(name)
+    return real_unlink(name, *args, **kwargs)
+
+
+def rebind_then_link(*args, **kwargs):
+    superseded = directory / "archive" / "superseded"
+    if kwargs.get("dst_dir_fd") is not None and not superseded.is_symlink():
+        superseded.rename(outside / "superseded-moved")
+        superseded.symlink_to(outside / "elsewhere")
+    return real_link(*args, **kwargs)
+
+
+os.link, os.unlink = rebind_then_link, spy_source_unlink
+try:
+    for _beat in range(2):
+        bridge._retry_withheld_reviews()
+finally:
+    os.link, os.unlink = real_link, real_unlink
+check(live.is_file() and live.read_bytes() == before_bytes and not outside_files(outside)
+      and len(shared_posts()) == before and not source_unlinks,
+      f"superseded/ rebound after it was opened: the record stays, nothing outside "
+      f"({outside_files(outside)})")
+
+# The target folder rebound after the check but before the source is unlinked: the record is put
+# back through the held fds and nothing is left outside.
+bridge._STATE = root / "write-superseded-late-rebind"
+directory = bridge._STATE / "withheld-team-results"
+outside = root / "outside-superseded-late-rebind"
+outside.mkdir()
+(directory / "archive" / "superseded").mkdir(parents=True)
+(directory / "archive" / "wr_0000000000000000.json").write_text(
+    json.dumps({**base_record, **YES, "dm_event_id": "$late-rebind"}))
+live = directory / "wr_0000000000000000.json"
+live.write_text(json.dumps({**base_record, **NO, "dm_event_id": "$late-rebind"}))
+before_bytes, real_unlink = live.read_bytes(), os.unlink
+
+
+def rebind_then_unlink(name, *args, **kwargs):
+    superseded = directory / "archive" / "superseded"
+    if kwargs.get("dir_fd") is not None and str(name) == live.name and not superseded.is_symlink():
+        superseded.rename(outside / "superseded-moved")
+        superseded.symlink_to(outside / "elsewhere")
+    return real_unlink(name, *args, **kwargs)
+
+
+os.unlink = rebind_then_unlink
+try:
+    bridge._retry_withheld_reviews()
+finally:
+    os.unlink = real_unlink
+check(live.is_file() and live.read_bytes() == before_bytes and not outside_files(outside),
+      f"superseded/ rebound just before the unlink: the record is put back, nothing outside "
+      f"({outside_files(outside)})")
+
+# A Windows junction is not S_ISLNK; the walk refuses its reparse-point attribute at every step.
+junction_dir = root / "junction" / guard.WITHHELD_RESULT_DIR / "conflicts"
+junction_dir.mkdir(parents=True)
+real_lstat = os.lstat
+
+
+class JunctionStatus:
+    def __init__(self, status):
+        self.st_mode, self.st_dev, self.st_ino = status.st_mode, status.st_dev, status.st_ino
+        self.st_file_attributes = 0x400
+
+
+def lstat_marking_junction(candidate, *args, **kwargs):
+    status = real_lstat(candidate, *args, **kwargs)
+    return JunctionStatus(status) if pathlib.Path(candidate) == junction_dir else status
+
+
+os.lstat = lstat_marking_junction
+try:
+    junction_refused = raises_unknown(lambda: guard.present(junction_dir / "wr_1.json"))
+    junction_listing = raises_unknown(lambda: guard.entries(junction_dir, "*"))
+finally:
+    os.lstat = real_lstat
+check(junction_refused and junction_listing, "a junction on the way is unknown, like a link")
 
 # A final .issued reservation that is a link makes the reply unknown, never "no matching review".
 bridge._STATE = root / "reservation-leaf-linked"
