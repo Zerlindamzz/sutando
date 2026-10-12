@@ -29,6 +29,8 @@ export interface VoiceTaskRecord {
 	answeredBy?: string;
 	/** The user corrected this request with a later task: its own result is not said. */
 	supersededBy?: string;
+	/** The core ended it with nothing for the user to hear (a skip-marked result that answers no other task). */
+	retired?: boolean;
 	/** Last change, for the cap. */
 	at: number;
 }
@@ -100,6 +102,9 @@ export function createVoiceTaskStore(path: string, now: () => number = Date.now)
 			update(taskId, (row) => ({ ...row, answeredBy: target, ...(reached && row.delivery !== 'spoken' ? { delivery: reached } : {}) }));
 		},
 		/** The user corrected `taskId` with `by`. */
+		markRetired(taskId: string): void {
+			update(taskId, (row) => ({ ...row, retired: true }));
+		},
 		setSupersededBy(taskId: string, by: string): void {
 			if (taskId === by) return;
 			update(taskId, (row) => ({ ...row, supersededBy: by }));

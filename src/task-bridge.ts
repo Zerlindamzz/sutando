@@ -559,6 +559,8 @@ export interface VoiceTaskRow {
 	state: VoiceTaskState;
 	/** How the result reached the user, once it has. */
 	delivery?: 'spoken' | 'injected' | 'dm';
+	/** Ended with nothing to hear: nothing is pending for the user. */
+	retired?: boolean;
 }
 
 /** The relay agent's view for status answers: voice tasks from the last few hours, oldest first. */
@@ -568,7 +570,7 @@ export function voiceTaskRows(now = Date.now()): VoiceTaskRow[] {
 		if (row.submittedAt === undefined || now - row.submittedAt > STATUS_WINDOW_MS) continue;
 		let state: VoiceTaskRow['state'] = voiceTaskState(id);
 		if (row.cancelRequested && _hasResult(id)) state = 'done';
-		rows.push({ id, text: row.text ?? '', submittedAt: row.submittedAt, state, delivery: row.delivery });
+		rows.push({ id, text: row.text ?? '', submittedAt: row.submittedAt, state, delivery: row.delivery, ...(row.retired ? { retired: true } : {}) });
 	}
 	return rows;
 }
@@ -1716,6 +1718,10 @@ export function startResultWatcher(onResult: ResultListener, isClientConnected: 
 						// That result already reached the model: this task's call has nothing more coming.
 						const went = voiceTaskStore.get(taskId)?.delivery;
 						if (went === 'spoken' || went === 'injected') _onVoiceTaskEnded?.(taskId, 'delivered_separately');
+					} else if (voiceTaskStore.get(taskId)) {
+						// Nothing to hear for this task: the table must not count it as pending (2026-10-12 00:33:
+						// two tasks retired this way were counted, and the user heard "6" for 4).
+						voiceTaskStore.markRetired(taskId);
 					}
 					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
 					_deliveredResults.add(file);

@@ -15,7 +15,8 @@ mkdirSync(join(TMP, 'results'), { recursive: true });
 
 const { wireDurableChannels } = await import('../src/live-agent-runtime.js');
 const { RelayAgent, createVoiceTaskStore, NOT_PICKED_MS } = await import('../src/relay-agent.js');
-const { voiceTaskStore, setVoiceTaskEndedListener } = await import('../src/task-bridge.js');
+const { voiceTaskStore, setVoiceTaskEndedListener, voiceTaskRows } = await import('../src/task-bridge.js');
+const { voiceTaskCounts } = await import('../src/inline-tools.js');
 
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
@@ -139,6 +140,22 @@ describe('relay agent end to end', () => {
 		await until(() => voiceTaskStore.get(id)?.delivery === 'dm');
 		assert.equal(voiceTaskStore.get(id)?.delivery, 'dm', 'one DM copy; read on reconnect');
 		session.clientConnected = true;
+	});
+
+	it('a task the core ends with a skip-marked result is not pending for the user', async () => {
+		// 2026-10-12 00:33 UTC: two tasks cleared with [no-send] results earlier stayed "done, not heard" in the
+		// table; "how many pending" counted them and the user heard 6 for 4.
+		const id = voiceTask('cleared later');
+		submitted = { status: 'pending', taskId: id, queuedAhead: 0, watcherOnline: true };
+		void relay.invoke('Execute tool: work', { task: 'cleared later' });
+		await tick(0);
+		const mine = () => voiceTaskRows().filter((r) => r.id === id);
+		assert.equal(voiceTaskCounts(mine()).pending, 1, 'queued: pending');
+		writeFileSync(join(TMP, 'results', `${id}.txt`), '[no-send]');
+		await until(() => voiceTaskStore.get(id)?.retired === true);
+		assert.equal(voiceTaskStore.get(id)?.retired, true);
+		assert.equal(mine()[0]?.retired, true);
+		assert.equal(voiceTaskCounts(mine()).pending, 0, 'nothing to hear: not pending');
 	});
 
 	it('two results landing in the same moment: both reach the model, the second after the model answered the first', async () => {

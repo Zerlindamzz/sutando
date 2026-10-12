@@ -501,9 +501,11 @@ describe('every status answer comes from the one table', () => {
 		// the core. The user was told "2 pending"; to them it was 3.
 		const { voiceTaskCounts, describeVoiceTasks } = await import('../src/inline-tools.js');
 		const row = (text: string, state: string, delivery?: string) => ({ id: text, text, submittedAt: 1, state, delivery }) as never;
-		const rows = [row('merged PRs', 'done', 'spoken'), row('PR 5302', 'done', 'spoken'), row('PR 5167', 'done'), row('PR 5329', 'started'), row('non-spicy dishes', 'queued'), row('old one', 'cancelled')];
-		assert.deepEqual(voiceTaskCounts(rows), { pending: 3, working: 2, doneNotHeard: 1 });
-		assert.match(describeVoiceTasks(rows), /^3 pending for the user \(not heard an answer yet\): 2 still being worked on, 1 done and waiting to be read to them\./);
+		const retired = { id: 'r', text: 'cleared [no-send]', submittedAt: 1, state: 'done', retired: true } as never;
+		const rows = [row('merged PRs', 'done', 'spoken'), row('PR 5302', 'done', 'spoken'), row('PR 5167', 'done'), row('PR 5329', 'started'), row('non-spicy dishes', 'queued'), row('old one', 'cancelled'), retired];
+		assert.deepEqual(voiceTaskCounts(rows), { pending: 3, working: 2, doneNotHeard: 1 }, 'a task ended with nothing to say is not pending');
+		assert.match(describeVoiceTasks(rows), /^Pending for the user: 3 \(they have not heard an answer to these yet: 2 the core is still working on, 1 finished and waiting to be read to them\)\./);
+		assert.match(describeVoiceTasks(rows), /1 ended with nothing to say \("cleared \[no-send\]"\)/);
 		const tool = src('voice-agent.ts').split("name: 'get_task_status'")[1].split('};')[0];
 		assert.ok(tool.includes('voiceTaskCounts(rows)') && tool.includes('pendingTasks: counts.pending') && !tool.includes('openTasks'), 'the tool reports the table\'s count');
 	});
@@ -512,8 +514,8 @@ describe('every status answer comes from the one table', () => {
 		const { describeVoiceTasks } = await import('../src/inline-tools.js');
 		const row = (text: string, state: string, delivery?: string) => ({ id: text, text, submittedAt: 1, state, delivery }) as never;
 		const out = describeVoiceTasks([row('check PR 5250', 'started'), row('check PR 5259', 'queued'), row('check PR 3509', 'done', 'dm'), row('check PR 5140', 'done', 'spoken')]);
-		assert.match(out, /1 in progress \("check PR 5250"\)/);
-		assert.match(out, /1 queued \("check PR 5259"\)/);
+		assert.match(out, /1 the core is working on \("check PR 5250"\)/);
+		assert.match(out, /1 queued at the core \("check PR 5259"\)/);
 		assert.match(out, /1 done but the user has not heard the result yet \("check PR 3509"\)/);
 		assert.match(out, /1 done and already told to the user \("check PR 5140"\)/);
 		assert.match(describeVoiceTasks([]), /no tasks/);
