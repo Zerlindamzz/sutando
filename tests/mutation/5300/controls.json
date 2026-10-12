@@ -122,6 +122,18 @@
    "file": "src/policy/egress/result.py",
    "old": "        os.chmod(_ensure_dir(directory), 0o700)\n    except OSError:\n        return False",
    "new": "        directory.mkdir(parents=True, exist_ok=True)\n        os.chmod(directory, 0o700)\n    except OSError:\n        return False"
+  },
+  {
+   "name": "the move syncs the folder it linked into by name, not by fd",
+   "file": "src/policy/egress/result.py",
+   "old": "            _fsync_fd(target_fd)                         # the directory linked into, by fd, not name",
+   "new": "            _fsync_directory(target.parent)"
+  },
+  {
+   "name": "the move follows a source swapped for a link",
+   "file": "src/policy/egress/result.py",
+   "old": "                    follow_symlinks=False)               # no-clobber: an existing file stays",
+   "new": "                    follow_symlinks=True)"
   }
  ]
 }

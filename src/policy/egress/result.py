@@ -628,9 +628,9 @@ def _durable_move(source: Path, target: Path) -> None:
         try:
             os.link(source.name, target.name, src_dir_fd=source_fd, dst_dir_fd=target_fd,
                     follow_symlinks=False)               # no-clobber: an existing file stays
-            _fsync_directory(target.parent)
+            _fsync_fd(target_fd)                         # the directory linked into, by fd, not name
             os.unlink(source.name, dir_fd=source_fd)
-            _fsync_directory(source.parent)
+            _fsync_fd(source_fd)
         finally:
             os.close(target_fd)
     finally:
@@ -1050,9 +1050,13 @@ def _fsync_directory(directory: Path) -> None:
     if os.name != "nt":
         fd = os.open(directory, os.O_RDONLY)
         try:
-            os.fsync(fd)
+            _fsync_fd(fd)
         finally:
             os.close(fd)
+
+
+def _fsync_fd(fd: int) -> None:
+    os.fsync(fd)
 
 
 def suppressed_record_path(state_dir: Path, task_id: str, body_digest: str = "") -> Path:

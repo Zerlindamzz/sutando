@@ -990,21 +990,21 @@ check(handled is True and "not a recognised outcome" in answer and "Kept private
 
 # 22. A move never deletes its only copy before the new one is durable: if syncing the
 # target fails, the original stays (archive, freeze and retire alike).
-real_sync = guard._fsync_directory
+real_sync, real_fd_sync = guard._fsync_directory, guard._fsync_fd
 
 
-def failing_sync(directory):
+def failing_sync(_directory_or_fd):
     raise OSError(5, "EIO")
 
 
 bridge._STATE = root / "durable-archive"
 path, rid = new_review("task-durable-archive")
 decided = dict(guard.claim_withheld_decision(path, dict(YES)))
-guard._fsync_directory = failing_sync
+guard._fsync_fd = failing_sync
 try:
     moved = guard.archive_record(path)
 finally:
-    guard._fsync_directory = real_sync
+    guard._fsync_fd = real_fd_sync
 check(moved is False and path.exists(), "archive: the live record stays when the move cannot be made durable")
 bridge._STATE = root / "durable-freeze"
 directory = bridge._STATE / "withheld-team-results"
@@ -1012,11 +1012,11 @@ directory.mkdir(parents=True)
 conflict = directory / "wr_conflict.json"
 guard._reserve(conflict, guard._body_digest("first body"))
 conflict.write_text(json.dumps({"withheld_body": "second body"}))
-guard._fsync_directory = failing_sync
+guard._fsync_fd = failing_sync
 try:
     _acted, frozen_now = guard.actionable_records(directory)
 finally:
-    guard._fsync_directory = real_sync
+    guard._fsync_fd = real_fd_sync
 check(frozen_now == [] and conflict.exists(), "freeze: the record stays when the move cannot be made durable")
 bridge._STATE = root / "durable-retire"
 directory = bridge._STATE / "withheld-team-results"
@@ -1025,14 +1025,14 @@ live = directory / "wr_0000000000000000.json"
 (directory / "archive" / live.name).write_text(json.dumps({**card, "status": "kept_private",
                                                           "decision": "sensitive"}))
 live.write_text(json.dumps({**card, **NO}))
-guard._fsync_directory = failing_sync
+guard._fsync_fd = failing_sync
 try:
     retired = guard.retire_superseded_record(live)
     raised = None
 except OSError as exc:
     retired, raised = None, exc
 finally:
-    guard._fsync_directory = real_sync
+    guard._fsync_fd = real_fd_sync
 check(raised is not None and live.exists(), "retire: the copy stays when the move cannot be made durable")
 
 # 23. Every remaining record write runs under the ledger lock: no file is linked, unlinked,
@@ -2357,6 +2357,75 @@ for label in ("suppressed", "quarantined"):
         refused = guard.journal_quarantined_attachment("[file: /tmp/x]\nB", state, "task-j", now=1000) is False
     check(refused and not any(outside.iterdir()) and outside.stat().st_mode & 0o777 == 0o755,
           f"journal-{label}: a linked suppression namespace is refused, nothing written outside")
+
+# The move syncs the folder it linked into by fd, before the unlink: with that folder swapped right
+# after the link, the replacement is never the one synced.
+bridge._STATE = root / "move-sync-by-fd"
+path, rid = new_review("task-move-sync-by-fd")
+guard.claim_withheld_decision(path, dict(YES))
+archive_dir = path.parent / "archive"
+archive_dir.mkdir(mode=0o700)
+original_inode, events = os.stat(archive_dir).st_ino, []
+real_link, real_unlink, real_fd_sync = os.link, os.unlink, guard._fsync_fd
+
+
+def link_then_swap(*args, **kwargs):
+    real_link(*args, **kwargs)
+    if archive_dir.exists() and os.stat(archive_dir).st_ino == original_inode:
+        archive_dir.rename(archive_dir.with_name("archive-linked-into"))
+        archive_dir.mkdir(mode=0o700)
+
+
+def spy_unlink(*args, **kwargs):
+    events.append(("unlink", None))
+    return real_unlink(*args, **kwargs)
+
+
+def spy_fd_sync(fd):
+    events.append(("sync", os.fstat(fd).st_ino))
+    return real_fd_sync(fd)
+
+
+os.link, os.unlink, guard._fsync_fd = link_then_swap, spy_unlink, spy_fd_sync
+try:
+    moved = guard.archive_record(path)
+finally:
+    os.link, os.unlink, guard._fsync_fd = real_link, real_unlink, real_fd_sync
+replacement_inode = os.stat(archive_dir).st_ino
+unlinked_at = events.index(("unlink", None)) if ("unlink", None) in events else -1
+check(moved is True and ("sync", original_inode) in events[:max(unlinked_at, 0)]
+      and ("sync", replacement_inode) not in events,
+      f"the move syncs the folder it linked into, by fd, before the unlink: {events}")
+
+# The move links the verified entry itself, never what a link swapped in for it points to.
+bridge._STATE = root / "move-no-follow"
+namespace = bridge._STATE / guard.WITHHELD_RESULT_DIR
+namespace.mkdir(parents=True)
+(bridge._STATE / "outside-record.json").write_text('{"withheld_body": "OUTSIDE"}')
+source = namespace / "wr_3.json"
+source.write_text("{}")
+real_present = guard.present
+
+
+def checked_then_linked(candidate, kind=None):
+    answer = real_present(candidate, kind)
+    if pathlib.Path(candidate) == source and not source.is_symlink():
+        source.unlink()
+        source.symlink_to(bridge._STATE / "outside-record.json")
+    return answer
+
+
+guard.present = checked_then_linked
+try:
+    guard._durable_move(source, namespace / "archive" / "wr_3.json")
+except OSError:
+    pass
+finally:
+    guard.present = real_present
+moved_copy = namespace / "archive" / "wr_3.json"
+check(not (moved_copy.exists() and not moved_copy.is_symlink()
+           and os.stat(moved_copy).st_ino == os.stat(bridge._STATE / "outside-record.json").st_ino),
+      "a source swapped for a link is never followed into the namespace")
 
 # A final .issued reservation that is a link makes the reply unknown, never "no matching review".
 bridge._STATE = root / "reservation-leaf-linked"
