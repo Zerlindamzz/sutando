@@ -888,10 +888,17 @@ def _pending_review_records() -> list[tuple[Path, dict]]:
     for path in frozen:
         _log(f"withheld review {path.name}: conflicts with its id's decision or reservation; "
              f"frozen in {path.parent.name}/ for the owner, never acted on")
-    return [(path, record) for path, record in actionable
-            if path.name.startswith("wr_") and record.get("status") in (
-                "awaiting_owner", "publish_pending", "kept_private", "published",
-                "publish_failed")]
+    listed = []
+    for path, record in actionable:
+        if not (path.name.startswith("wr_") and record.get("status") in (
+                "awaiting_owner", "publish_pending", "kept_private", "published", "publish_failed")):
+            continue
+        if not team_result_guard.decision_is_durable(record):
+            # The durability barrier: a decision acts only once it is durably on disk.
+            if team_result_guard.establish_decision(path):
+                record = _read_private_json(path) or record
+        listed.append((path, record))
+    return listed
 
 
 def _archive_resolved_review(path: Path, record: dict) -> bool:
@@ -1017,6 +1024,12 @@ def _publish_review(path: Path, record: dict) -> bool:
     if not room.startswith("!") or not body:
         return _record_publish_failure(path, record, version, "invalid origin/body")
     core, item_id = _withheld_outbox(), f"{record['review_id']}.{claim}"
+    landed = _reread_record(path)
+    if (landed.get("decision_claim_id") == claim
+            and isinstance(landed.get("release_event_id"), str) and landed["release_event_id"]):
+        # A recorded event id proves the release landed: settle, never send it again.
+        _settle_landed_release(core, item_id, room)
+        return _commit_landed(path, record, landed)
     payload = json.dumps({"room_id": room, "body": body}, sort_keys=True).encode("utf-8")
     core.backend.publish(item_id, payload)  # once per claim; the outbox owns every retry
     if (read_item(core.backend.root, item_id) or {}).get("status") not in core.backend.TERMINAL:
@@ -1028,12 +1041,7 @@ def _publish_review(path: Path, record: dict) -> bool:
             return True
         event_id = current.get("release_event_id")
         if isinstance(event_id, str) and event_id:
-            committed = _commit_publication(path, current, team_result_guard.record_version(current),
-                                            event_id)
-            if committed:
-                record.clear()
-                record.update(current)  # the caller continues from the committed version
-            return committed
+            return _commit_landed(path, record, current)
         if f"no-receipt:{item_id}" not in _REFUSED_REVIEW_PUBLICATIONS:
             _REFUSED_REVIEW_PUBLICATIONS.add(f"no-receipt:{item_id}")
             _log(f"withheld review {path.stem}: the outbox marks the release delivered but no "
@@ -1050,9 +1058,31 @@ def _publish_review(path: Path, record: dict) -> bool:
             _REFUSED_REVIEW_PUBLICATIONS.add(f"unknown:{item_id}")
             _log(f"withheld review {path.stem}: the publication may have landed but was not "
                  f"confirmed ({item.get('reason')}); it is not sent again and stays pending. "
-                 f"To send it again (a new dedupe key, so it may post twice): python3 "
-                 f"src/outbox_cli.py --root {core.backend.root} requeue {item_id}")
+                 f"Check the room first; to send it again (a new dedupe key, so it may post "
+                 f"twice): {_requeue_command(core.backend.root, item_id)}")
     return False
+
+
+def _commit_landed(path: Path, record: dict, current: dict) -> bool:
+    committed = _commit_publication(path, current, team_result_guard.record_version(current),
+                                    current["release_event_id"])
+    if committed:
+        record.clear()
+        record.update(current)  # the caller continues from the committed version
+    return committed
+
+
+def _settle_landed_release(core: DeliveryCore, item_id: str, room: str) -> None:
+    """Close an outbox item whose release is proven by a recorded event id, through the
+    outbox's own claim, so it is never delivered again; a held or terminal item is left."""
+    token = core.backend.claim(item_id, core.worker)
+    if token is not None:
+        core.backend.complete(token, CoreDeliveryOutcome.CONFIRMED,
+                              provider=type(core.provider).__name__, destination=room)
+
+
+def _requeue_command(root, item_id: str) -> str:
+    return shlex.join(["python3", "src/outbox_cli.py", "--root", str(root), "requeue", item_id])
 
 
 def _reread_record(path: Path) -> dict:
@@ -1073,29 +1103,12 @@ def _record_publish_failure(path: Path, record: dict, version: dict, reason) -> 
 
 
 def _commit_publication(path: Path, record: dict, version: dict, event_id: str) -> bool:
-    """Record a confirmed publication on the review, onto its newer version if the record
-    moved meanwhile; an unreadable record is read again, never answered by another POST."""
-    landed = {"status": "published", "published_at": time.time(),
-              "published_event_id": event_id, "card_resolution_pending": True}
-    record.update(landed)
+    """Record a confirmed publication on the review; a record that moved meanwhile is left
+    to the next beat, which commits it from the durable receipt and never sends again."""
+    record.update({"status": "published", "published_at": time.time(),
+                   "published_event_id": event_id, "card_resolution_pending": True})
     if team_result_guard.update_record(path, record, expect=version):
         return True
-    for _attempt in range(5):
-        current = _read_private_json(path)
-        if current is None:
-            if path.exists():
-                continue
-            break  # retired or frozen: no live record left to carry the publication
-        if current.get("status") == "published":
-            return True
-        if (current.get("status") != "publish_pending"
-                or current.get("decision_claim_id") != record.get("decision_claim_id")):
-            break
-        version = team_result_guard.record_version(current)
-        current.update(landed)
-        if team_result_guard.update_record(path, current, expect=version):
-            record.update(current)
-            return True
     _stale_review_write(path, "publication")
     return False
 
@@ -1167,7 +1180,7 @@ def _defers_to_archive(path: Path) -> bool:
 
 
 def _resolve_review_card(path: Path, record: dict) -> bool:
-    if _defers_to_archive(path):
+    if not team_result_guard.decision_is_durable(record) or _defers_to_archive(path):
         return False
     version = team_result_guard.record_version(record)
     answer = _edit_review_card(record)
@@ -1222,15 +1235,21 @@ def _handle_hitl_action(task: dict):
 
 def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | None":
     # The first durable decision is final; a later or racing reply is closed and logged.
-    claimed = team_result_guard.claim_withheld_decision(path, updates)
+    try:
+        claimed = team_result_guard.claim_withheld_decision(path, updates)
+    except Exception as exc:  # noqa: BLE001 — a failed claim is reported, never escapes the beat
+        _log(f"withheld review {path.stem}: claim failed ({exc})")
+        claimed = None
     if claimed is None:
         current = _read_private_json(path) or {}
         if team_result_guard.decision_lost(path):
             _log(f"withheld review {path.stem}: an earlier decision was lost; reply "
                  f"{task.get('id')} not applied, left for the owner")
-            _queue_review_control_result(task, body=(
-                f"An earlier decision on review `{path.stem}` was not saved, so this reply was "
-                "not applied either. Nothing was published; the review is left for you to check."))
+            _queue_review_control_result(task, body=_lost_decision_notice(path, current))
+        elif current.get("status") not in (None, "awaiting_owner") \
+                and not team_result_guard.decision_is_durable(current):
+            _log(f"withheld review {path.stem}: decision recorded, it acts once it is durable; "
+                 f"reply {task.get('id')} not applied again")
         elif current.get("status") == "awaiting_owner":
             _log(f"withheld review {path.stem}: decision could not be saved; reply "
                  f"{task.get('id')} not applied, the owner can answer again")
@@ -1241,6 +1260,21 @@ def _claim_review_decision(task: dict, path: Path, updates: dict) -> "dict | Non
             _log(f"withheld review {path.stem}: already decided; reply {task.get('id')} ignored")
     _queue_review_control_result(task)
     return claimed
+
+
+def _lost_decision_notice(path: Path, record: dict) -> str:
+    """What the owner is told about a decision lost after its claim was issued: whether a
+    publication was ever attempted, which only the outbox can prove, and how to unlock it."""
+    claims = team_result_guard.issued_claims(path)
+    root = _withheld_outbox().backend.root
+    attempted = any(read_item(root, f"{record.get('review_id') or path.stem}.{c}") is not None
+                    for c in claims)
+    sent = ("Its publication may already have been sent; check the room before answering."
+            if attempted else "Nothing was sent for it.")
+    unlock = shlex.join(["rm", "--", *(str(path.parent / "claims" / f"{path.stem}.{c}")
+                                       for c in claims)])
+    return (f"An earlier decision on review `{path.stem}` was not saved, so this reply was not "
+            f"applied. {sent} To answer again, remove its claim: {unlock}")
 
 
 def _handle_review_decision(task: dict) -> bool:

@@ -9780,7 +9780,7 @@ def check_outbox_parked(workspace_dir: Optional[Path] = None) -> dict:
     except ImportError as exc:
         return {"name": name, "status": "warn",
                 "detail": f"cannot read the outbox ({exc}) — parked replies unjudged"}
-    parked: list[tuple[str, str]] = []  # (root.name, item_id) -- roots differ, see below
+    parked: list[tuple[str, str, str]] = []  # (root.name, item_id, reason) -- roots differ, see below
     unreadable: list[str] = []
     for root in roots:
         # An unreadable ROOT reaches here too, and a raise would abort every
@@ -9794,20 +9794,31 @@ def check_outbox_parked(workspace_dir: Optional[Path] = None) -> dict:
             unreadable.append(f"{root.name} ({exc})")
             continue
         for d in outbox.list_items(root, status="PARKED"):
-            parked.append((root.name, str(d.get("item_id") or "?")))
+            parked.append((root.name, str(d.get("item_id") or "?"), str(d.get("reason") or "")))
     if unreadable:
         return {"name": name, "status": "warn",
                 "detail": "outbox root(s) unreadable, so parked replies are unjudged: "
                           + "; ".join(unreadable)}
     if parked:
         parked.sort()
-        shown = ", ".join(f"{item_id} (--root <ws>/results/{root_name})"
-                           for root_name, item_id in parked[:4])
-        more = f" (+{len(parked) - 4} more)" if len(parked) > 4 else ""
+
+        def listing(items):
+            shown = ", ".join(f"{item_id} (--root <ws>/results/{root_name})"
+                               for root_name, item_id, _reason in items[:4])
+            return shown + (f" (+{len(items) - 4} more)" if len(items) > 4 else "")
+        # An outcome-unknown park may have landed: a requeue sends again and can post twice.
+        unknown = [p for p in parked if p[2] == "outcome-unknown"]
+        undelivered = [p for p in parked if p[2] != "outcome-unknown"]
+        parts = []
+        if undelivered:
+            parts.append(f"{len(undelivered)} never delivered — nothing retries them: "
+                         f"{listing(undelivered)}")
+        if unknown:
+            parts.append(f"{len(unknown)} may have been delivered — do not requeue without "
+                         f"checking the room: {listing(unknown)}")
         return {"name": name, "status": "warn",
-                "detail": f"{len(parked)} reply/replies PARKED and never delivered — "
-                          f"nothing retries them: {shown}{more}. Recover with "
-                          f"`python3 src/outbox_cli.py --root <shown-above> requeue <id>` "
+                "detail": f"{len(parked)} reply/replies PARKED; " + "; ".join(parts) + ". "
+                          f"Recover with `python3 src/outbox_cli.py --root <shown-above> requeue <id>` "
                           f"(the root varies per item; a single hardcoded root under-reports)"}
     return {"name": name, "status": "ok",
             "detail": f"no parked replies across {len(roots)} outbox root(s)"}

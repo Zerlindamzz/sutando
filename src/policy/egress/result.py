@@ -456,7 +456,7 @@ def _write_owned_record(path: Path, record: dict, field: str, expect: dict,
         os.replace(temporary, path)
         replaced = True
         _fsync_directory(path.parent)  # success is reported only once the rename is durable
-    except OSError:
+    except Exception:  # noqa: BLE001 — any failure reports whether the rename happened
         if landed is not None:
             landed.append(replaced)  # whether the new record may be on disk
         return False
@@ -721,7 +721,13 @@ def withheld_claim_publishable(path: Path, claim_id) -> bool:
         issued = _issued_claim(path, claim_id).is_file()
     return (issued and record is not None and record.get("status") == "publish_pending"
             and record.get("decision") == "false_positive"
-            and record.get("decision_claim_id") == claim_id)
+            and record.get("decision_claim_id") == claim_id and decision_is_durable(record))
+
+
+def decision_is_durable(record) -> bool:
+    """A decided record acts (POST, card edit) only once its decision is durable; a record
+    without the flag predates it and was written durably."""
+    return isinstance(record, dict) and record.get("decision_durable") is not False
 
 
 def archived_withheld_decision(path: Path) -> "dict | None":
@@ -808,13 +814,47 @@ def claim_withheld_decision(path: Path, updates: dict) -> "dict | None":
         os.close(os.open(ledger, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         _fsync_directory(ledger.parent)  # the ledger entry is durable before the record names it
         expect, landed = record_version(record), []
-        record.update(updates, decision_claim_id=claim_id)
+        record.update(updates, decision_claim_id=claim_id, decision_durable=False)
         if _write_owned_record(path, record, "withheld_body", expect, landed):
-            return record
+            # Synced, so the decision is durable; only now may anything act on it.
+            durable = dict(record, decision_durable=True)
+            return durable if _write_owned_record(path, durable, "withheld_body",
+                                                  record_version(record)) else record
         if not any(landed):
-            ledger.unlink(missing_ok=True)  # nothing was written: the owner may answer again
-            _fsync_directory(ledger.parent)
+            try:
+                ledger.unlink(missing_ok=True)  # nothing was written: the owner may answer again
+                _fsync_directory(ledger.parent)
+            except Exception:  # noqa: BLE001 — a left claim is reported as lost, never silent
+                pass
         return None
+
+
+def establish_decision(path: Path) -> bool:
+    """The durability barrier: sync a decided record whose decision is not yet durable and
+    mark it so; True when it is durable and may act."""
+    path = Path(path)
+    with _ledger_lock(_record_directory(path)):
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(current, dict):
+            return False
+        if decision_is_durable(current):
+            return True
+        try:
+            _fsync_directory(path.parent)
+        except OSError:
+            return False
+        return _write_owned_record(path, dict(current, decision_durable=True), "withheld_body",
+                                   record_version(current))
+
+
+def issued_claims(path: Path) -> list:
+    """The claim ids issued for this review, oldest name first."""
+    path = Path(path)
+    return sorted(p.name[len(path.stem) + 1:] for p in
+                  _issued_claim(path, "*").parent.glob(f"{path.stem}.*"))
 
 
 def record_release_receipt(path: Path, claim_id, event_id: str) -> bool:

@@ -93,6 +93,15 @@ class OutboxParkedProbe(unittest.TestCase):
         self.assertIn("task-abc", r["detail"])
         self.assertIn("requeue", r["detail"])
 
+    def test_an_unknown_outcome_park_warns_against_a_blind_requeue(self):
+        self._items(".outbox-withheld-review").joinpath("wr_1.c.json").write_text(json.dumps(
+            {"item_id": "wr_1.c", "status": "PARKED", "reason": "outcome-unknown"}), encoding="utf-8")
+        self._write("task-abc", "PARKED")
+        r = self.hc.check_outbox_parked(self.ws)
+        self.assertIn("1 may have been delivered — do not requeue without checking the room: wr_1.c",
+                      r["detail"])
+        self.assertIn("1 never delivered — nothing retries them: task-abc", r["detail"])
+
     def test_a_delivered_item_is_not_counted(self):
         self._write("task-abc", "PARKED")
         self._write("task-def", "DELIVERED")

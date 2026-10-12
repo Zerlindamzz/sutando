@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1488,6 +1489,177 @@ try:
 finally:
     guard._fsync_directory = real_sync
 check(synced[:1] == [path.parent / "claims"], f"the claim ledger is synced first: {synced[:2]}")
+
+# 25d. A decision whose rename landed but whose directory sync keeps failing is not durable:
+# the real retry beat posts nothing and edits no card until a durability barrier succeeds.
+bridge._STATE = root / "undurable-decision"
+path, rid = new_review("task-undurable")
+mark, before = len(calls), len(shared_posts())
+
+
+def record_dir_sync_fails(directory):
+    if pathlib.Path(directory) == path.parent:
+        raise OSError(5, "EIO")
+    real_sync(directory)
+
+
+guard._fsync_directory = record_dir_sync_fails
+try:
+    bridge._handle_review_decision(decision("No", rid, "undurable-no"))
+    for _beat in range(3):
+        bridge._retry_withheld_reviews()
+    stuck = json.loads(path.read_text())
+finally:
+    guard._fsync_directory = real_sync
+check(stuck["status"] == "publish_pending" and stuck.get("decision_durable") is False
+      and len(shared_posts()) == before and card_edits_since(mark) == [],
+      f"undurable decision: no POST and no card edit while the sync fails ({stuck['status']})")
+bridge._retry_withheld_reviews()
+_live, record = final_record(path)
+check(record["status"] == "published" and len(shared_posts()) - before == 1,
+      f"undurable decision: exactly one publication after the barrier ({record['status']})")
+
+# 25e. A claim survives a rollback of its record: the owner is told whether a publication
+# may have been sent, which only the outbox can prove, and how to unlock the review.
+for label, sent in (("rollback-unsent", False), ("rollback-sent", True)):
+    bridge._STATE = root / label
+    path, rid = new_review(f"task-{label}")
+    awaiting = path.read_bytes()
+    claimed = guard.claim_withheld_decision(path, dict(NO))
+    if sent:
+        check(bridge._publish_review(path, dict(claimed)) is True, f"{label}: one publication")
+    path.write_bytes(awaiting)  # power loss: the claim survived, the decided record did not
+    bridge._handle_review_decision(decision("Yes", rid, f"{label}-again"))
+    notice = json.loads(bridge._control_result_path(f"{label}-again").read_text())["body"]
+    claims = sorted((path.parent / "claims").glob(f"{path.stem}.*"))
+    check(("may already have been sent" in notice) == sent and ("Nothing was sent" in notice) != sent
+          and f"rm -- {claims[0]}" in notice,
+          f"{label}: the notice says what the outbox proves and how to unlock: {notice[-90:]}")
+
+# 25f. A crash after the receipt is written but before the outbox marks it delivered ends
+# published from the receipt, with no second POST, whether or not the claim can be reclaimed.
+for label, owner_dead in (("receipt-crash-reclaimed", True), ("receipt-crash-held", False)):
+    path, rid, claimed, room_req = release(label, lambda: {"event_id": "$landed"})
+    provider = bridge._withheld_outbox().provider
+    real_record = provider._record_receipt
+
+    def record_then_crash(*a, _real=real_record):
+        _real(*a)
+        raise Crash()
+
+    provider._record_receipt = record_then_crash
+    before = len(shared_posts())
+    bridge._req = room_req
+    try:
+        bridge._publish_review(path, claimed)
+    except Crash:
+        pass
+    finally:
+        bridge._req = fake_req
+        provider._record_receipt = real_record
+    if owner_dead:
+        owner_died(path, rid, claimed)
+    bridge._WITHHELD_OUTBOX = None
+    run_publish(path, claimed, room_req)
+    _live, record = final_record(path)
+    check(len(shared_posts()) - before == 1 and record["status"] == "published"
+          and record["published_event_id"] == "$landed"
+          and (outbox_item(path, rid, claimed).get("status") == "DELIVERED") == owner_dead,
+          f"{label}: published from the receipt, one POST ({record['status']})")
+
+# 25g. A receipt whose sync failed after the POST landed still proves the landing: the
+# release is published from it, never sent again.
+path, rid, claimed, room_req = release("receipt-sync-fails", lambda: {"event_id": "$synced-late"})
+
+
+def receipt_sync_fails(directory, _path=path):
+    if pathlib.Path(directory) == _path.parent and "release_event_id" in _path.read_text():
+        raise OSError(5, "EIO")
+    real_sync(directory)
+
+
+before = len(shared_posts())
+guard._fsync_directory = receipt_sync_fails
+try:
+    run_publish(path, claimed, room_req, beats=0)
+finally:
+    guard._fsync_directory = real_sync
+run_publish(path, claimed, room_req)
+_live, record = final_record(path)
+check(len(shared_posts()) - before == 1 and record["status"] == "published"
+      and record["published_event_id"] == "$synced-late",
+      f"receipt sync failed after the POST: published from the receipt once ({record['status']})")
+
+# 25h. Claim failures fail safe: a non-OSError write failure frees the review; a rollback
+# that fails leaves a claim the owner is told how to remove; a raising claim is reported.
+bridge._STATE = root / "claim-type-error"
+path, rid = new_review("task-claim-type-error")
+real_dump, dumped = guard.json.dump, []
+
+
+def dump_fails_once(*a, **k):
+    if not dumped:
+        dumped.append(True)
+        raise TypeError("not serialisable")
+    return real_dump(*a, **k)
+
+
+guard.json.dump = dump_fails_once
+try:
+    bridge._handle_review_decision(decision("Yes", rid, "type-error-1"))
+finally:
+    guard.json.dump = real_dump
+answer = json.loads(bridge._control_result_path("type-error-1").read_text())["body"]
+bridge._handle_review_decision(decision("Yes", rid, "type-error-2"))
+_live, record = final_record(path)
+check("please reply again" in answer and record["status"] == "kept_private",
+      f"a non-OSError write failure frees the review ({record['status']})")
+bridge._STATE = root / "rollback-fails"
+path, rid = new_review("task-rollback-fails")
+real_unlink, real_replace = pathlib.Path.unlink, os.replace
+
+
+def unlink_claim_fails(self, *a, **k):
+    if self.parent.name == "claims":
+        raise OSError(13, "EACCES")
+    return real_unlink(self, *a, **k)
+
+
+def replace_record_fails(source, target, *a, **k):
+    if pathlib.Path(target) == path:
+        raise OSError(28, "ENOSPC")
+    return real_replace(source, target, *a, **k)
+
+
+pathlib.Path.unlink, os.replace = unlink_claim_fails, replace_record_fails
+try:
+    bridge._handle_review_decision(decision("No", rid, "rollback-fails-1"))
+finally:
+    pathlib.Path.unlink, os.replace = real_unlink, real_replace
+bridge._handle_review_decision(decision("No", rid, "rollback-fails-2"))
+notice = json.loads(bridge._control_result_path("rollback-fails-2").read_text())["body"]
+check("To answer again, remove its claim: rm --" in notice and "Nothing was sent" in notice,
+      f"a failed rollback is reported with its unlock step: {notice[-80:]}")
+bridge._STATE = root / "claim-raises"
+path, rid = new_review("task-claim-raises")
+real_claim = guard.claim_withheld_decision
+guard.claim_withheld_decision = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+try:
+    raised = None
+    handled = bridge._handle_review_decision(decision("No", rid, "claim-raises"))
+except Exception as exc:  # noqa: BLE001
+    raised = exc
+finally:
+    guard.claim_withheld_decision = real_claim
+check(raised is None and handled is True and any("claim failed (boom)" in line for line in logs),
+      f"a raising claim is reported, never escapes the beat: {raised!r}")
+
+# 25i. The recovery command is shell-quoted, so a root under Application Support works.
+command = bridge._requeue_command(pathlib.Path("/Users/x/Library/Application Support/ws/results/"
+                                               ".outbox-withheld-review"), "wr_1.c")
+check(shlex.split(command) == ["python3", "src/outbox_cli.py", "--root",
+                               "/Users/x/Library/Application Support/ws/results/.outbox-withheld-review",
+                               "requeue", "wr_1.c"], f"the recovery command is quoted: {command}")
 
 # 26. A reconcile that keeps failing stops re-editing the card after a bounded number of
 # tries, and says so once.
