@@ -45,6 +45,7 @@ Format: `- Brief description of what changed. ([#NNN])`
 ## Changed
 
 <!-- refactor(), perf(), docs() changes visible to operators go here -->
+- voice: the built-in voice model default is `gemini-3.8-live` (was `gemini-2.5-flash-native-audio-preview-12-2025`), the model the seeded-install migration already moves to; search stays on. It applies where no config file sets a model (the packaged app seeds no template) and to new phone installs, whose template now carries it. Existing config files are unchanged.
 
 ## Security
 

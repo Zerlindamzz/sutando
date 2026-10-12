@@ -279,7 +279,7 @@ const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 // src/voice-config.ts. voice-agent ships with Gemini 3.8 Live and
 // googleSearch=false for low-latency voice conversations; this PR does not
 // claim a new code-heavy workload benchmark. Phone inherits the
-// package default (2.5+search) unless its own config overrides it.
+// package default (3.8 Live + search) unless its own config overrides it.
 import { loadVoiceConfig, migrateLegacyModel, revertModelMigration, resolveSessionTuning } from './voice-config.js';
 import { fireGuardedRestart, isVoiceAgentLaunchdManaged, restartAfterModelRevert } from './voice-config-switch.js';
 const _voiceAgentDir = dirname(fileURLToPath(import.meta.url));
