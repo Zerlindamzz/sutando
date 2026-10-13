@@ -59,7 +59,7 @@ A `200` answer carries no CORS headers, so a web page on another origin cannot r
 | `motion` | `idle`, `moving` or `unknown` |
 | `condition` | `healthy`, `abnormal` or `unknown` |
 | `reason` | why it is abnormal (see [Reasons](#reasons)), or `suspended` for a worker the pool's suspension took down or the owner paused; `null` otherwise |
-| `since` | epoch seconds the abnormal state was first seen, when the source knows it |
+| `since` | epoch seconds the abnormal state was first seen, when the source knows it; for `suspended`, the suspension's `at` or the pause marker's mtime |
 
 `view=full` adds `sources` to each agent: every input with its workspace-relative `path`,
 `age_s`, the `value` it read, and the `opinion` it gave. Use it to see why a verdict was reached.
@@ -171,7 +171,9 @@ state as the reason. `retired` workers are left out of the response.
 7. **A worker the owner paused** (`state/workers/<id>/paused` exists) that is not alive reads
    the same way, since the marker's mtime: the pool will not restart it, so its stale beat is
    the owner's choice, not an outage. A paused worker whose beat is still fresh reports as its
-   files say. Removing the marker lifts this.
+   files say. Removing the marker lifts this. A marker that exists but cannot be read leaves
+   a worker that is not alive at `unknown · unknown`, reason `null`: whether the owner paused
+   it cannot be told. The pool treats such a worker as paused and does not restart it.
 
 ## Runtime observation
 

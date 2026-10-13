@@ -525,6 +525,44 @@ class InstanceSessionSuspended(Base):
         w = self.snap(agent="workers")["agents"][0]
         self.assertEqual((w["alive"], w["condition"], w["reason"]), (True, "healthy", None))
 
+    def test_a_paused_worker_with_no_beat_file_is_suspended(self):
+        self.ws.worker()
+        self.ws.touch(f"state/workers/{WID}/paused", age=50)
+        w = self.snap(agent="workers")["agents"][0]
+        self.assertEqual((w["alive"], w["condition"], w["reason"], w["since"]),
+                         (False, "unknown", "suspended", NOW - 50))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads through chmod 000")
+    def test_a_dead_worker_whose_pause_marker_is_unreadable_is_unknown(self):
+        self.ws.worker()
+        self.ws.touch(f"state/watchers/{WID}.alive", age=hs.HEARTBEAT_STALE_S + 600)
+        self.ws.touch(f"state/workers/{WID}/paused", age=50)
+        wdir = self.ws.root / "state" / "workers" / WID
+        wdir.chmod(0)
+        try:
+            snap = self.snap(agent="workers")
+        finally:
+            wdir.chmod(0o755)
+        w = snap["agents"][0]
+        self.assertEqual((w["alive"], w["motion"], w["condition"], w["reason"], w["since"]),
+                         (False, "unknown", "unknown", None, None))
+        self.assertEqual(snap["overall"], "unknown")
+
+    def test_a_pause_read_error_never_crashes_the_snapshot(self):
+        self.ws.worker()
+        with mock.patch.object(hs.pool_suspension, "paused_at", side_effect=OSError(5, "EIO")):
+            w = self.snap(agent="workers")["agents"][0]
+        self.assertEqual((w["condition"], w["reason"]), ("unknown", None))
+
+    def test_a_live_worker_whose_pause_marker_is_unreadable_reads_as_its_files_say(self):
+        self.ws.worker()
+        self.ws.touch(f"state/watchers/{WID}.alive", age=5)
+        self.ws.supervisor("idle-ready", session=f"sutando-worker-{WID}",
+                           name=f"core-supervisor.sutando-worker-{WID}.json", age=10)
+        with mock.patch.object(hs.pool_suspension, "paused_at", side_effect=OSError(5, "EIO")):
+            w = self.snap(agent="workers")["agents"][0]
+        self.assertEqual((w["alive"], w["condition"], w["reason"]), (True, "healthy", None))
+
     def test_suspended_reads_the_pool_marker(self):
         self.assertIsNone(self.snap()["suspended"])
         self.ws.json("state/pool-suspended", {"reason": "app-quit", "at": 5, "stopped": [WID]})

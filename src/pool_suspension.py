@@ -55,9 +55,16 @@ def read(workspace=None) -> dict | None:
     return normalise(text)
 
 
-def paused_at(worker_dir) -> float | None:
-    """When the owner paused the worker whose records are in `worker_dir`; None while it is not paused."""
+def paused_path(workspace, worker_id: str) -> Path:
+    """The owner's pause marker for one worker; `workspace=None` resolves as `path()` does."""
+    root = Path(workspace if workspace is not None else resolve_workspace())
+    return root / "state" / "workers" / worker_id / PAUSED_MARKER
+
+
+def paused_at(workspace, worker_id: str) -> float | None:
+    """The pause marker's mtime, or None while the worker is not paused. A marker that
+    exists but cannot be stat'ed raises OSError, as `read()` does: each reader decides."""
     try:
-        return (Path(worker_dir) / PAUSED_MARKER).stat().st_mtime
-    except OSError:
+        return paused_path(workspace, worker_id).stat().st_mtime
+    except FileNotFoundError:
         return None

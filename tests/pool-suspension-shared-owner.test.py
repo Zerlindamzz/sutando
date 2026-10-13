@@ -83,10 +83,24 @@ class PausedContract(Base):
     def test_no_marker_is_not_paused_and_a_marker_reads_its_mtime(self):
         wdir = self.ws / "state" / "workers" / "w1"
         wdir.mkdir(parents=True)
-        self.assertIsNone(susp.paused_at(wdir))
+        self.assertEqual(susp.paused_path(self.ws, "w1"), wdir / susp.PAUSED_MARKER)
+        self.assertIsNone(susp.paused_at(self.ws, "w1"))
         (wdir / susp.PAUSED_MARKER).touch()
         os.utime(wdir / susp.PAUSED_MARKER, (42, 42))
-        self.assertEqual(susp.paused_at(wdir), 42)
+        self.assertEqual(susp.paused_at(self.ws, "w1"), 42)
+
+    def test_a_worker_with_no_records_at_all_is_not_paused(self):
+        self.assertIsNone(susp.paused_at(self.ws, "w1"))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads through chmod 000")
+    def test_an_unreadable_marker_raises_for_the_caller_to_judge(self):
+        wdir = self.ws / "state" / "workers" / "w1"
+        wdir.mkdir(parents=True)
+        (wdir / susp.PAUSED_MARKER).touch()
+        wdir.chmod(0)
+        self.addCleanup(wdir.chmod, 0o755)
+        with self.assertRaises(PermissionError):
+            susp.paused_at(self.ws, "w1")
 
 
 class Delegation(Base):
@@ -124,11 +138,11 @@ class Delegation(Base):
         self.assertEqual(sup.PAUSED_MARKER, susp.PAUSED_MARKER)
         with mock.patch.object(sup.pool_suspension, "paused_at", return_value=7) as read:
             self.assertTrue(sup.is_paused(self.ws, wid))
-        read.assert_called_once_with(self.ws / "state" / "workers" / wid)
+        read.assert_called_once_with(self.ws, wid)
         (self.ws / "state" / "roster.json").write_text(json.dumps({"workers": {wid: {"state": "live"}}}))
         with mock.patch.object(hs.pool_suspension, "paused_at", return_value=7) as read:
             row = hs.snapshot(self.ws, agent="workers", now=100.0)["agents"][0]
-        read.assert_called_once_with(self.ws / "state" / "workers" / wid)
+        read.assert_called_once_with(self.ws, wid)
         self.assertEqual((row["reason"], row["since"]), ("suspended", 7))
 
 

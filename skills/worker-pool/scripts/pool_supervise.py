@@ -57,8 +57,15 @@ def state_path(workspace) -> Path:
 
 
 def is_paused(workspace, worker_id) -> bool:
-    """Only the owner writes or removes this file; nothing here ever does."""
-    return pool_suspension.paused_at(wi.worker_dir(workspace, worker_id)) is not None
+    """Only the owner writes or removes this file; nothing here ever does. A marker
+    that cannot be read counts as paused: a pause must never be restarted through."""
+    wi.worker_dir(workspace, worker_id)     # a malformed id is refused, not "unpaused"
+    try:
+        return pool_suspension.paused_at(workspace, worker_id) is not None
+    except OSError as e:
+        print(f"pool-supervise: {worker_id}: pause marker unreadable ({e}); treating it as paused",
+              file=sys.stderr)
+        return True
 
 
 def probe_session(workspace, worker_id, *, runner=subprocess.run) -> bool | None:

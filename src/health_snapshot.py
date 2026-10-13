@@ -474,12 +474,18 @@ def snapshot(workspace=None, *, agent: str = "all", view: str = "summary", now=N
             current = sources["supervisor"] if started is not None else None
             row = _verdict({"id": wid, "role": "worker", "label": label, "session": _session(seat),
                             "alive": _alive(sources["watcher_beat"], current)}, sources)
-            paused = pool_suspension.paused_at(ws / "state" / "workers" / wid)
+            try:
+                paused, unreadable = pool_suspension.paused_at(ws, wid), False
+            except OSError:
+                paused, unreadable = None, True
             if wid in stopped:
                 row = _stopped_by_suspension(row, suspension["at"])
             # The owner's pause is the reason a dead worker is down; a live one still reports.
             elif paused is not None and row["alive"] is not True:
                 row = _stopped_by_suspension(row, paused)
+            # Whether the owner paused it cannot be told, so it is neither outage nor choice.
+            elif unreadable and row["alive"] is not True:
+                row = {**row, "motion": UNKNOWN, "condition": UNKNOWN, "reason": None, "since": None}
             agents.append((row, sources))
 
     conditions = {a["condition"] for a, _ in agents}
