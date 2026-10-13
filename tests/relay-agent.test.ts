@@ -320,6 +320,17 @@ describe('relay agent: every finished user turn is checked, whatever tool the vo
 		assert.deepEqual(parseTurnVerdict('ok'), { action: 'none' });
 	});
 
+	it('the prompts forbid filling in "that PR" from another request, defer to the assistant\'s own question, and drop fragments', async () => {
+		// 2026-10-12 23:53: "帮我查一下那个 PR 的状态" was sent as PR 5302 (from a request 15 minutes earlier) while the
+		// voice model was asking "which PR?"; a noise "A" made the user be asked again.
+		const { turnClassifierPrompt, workCheckPrompt } = await import('../src/work-request-check.js');
+		const turn = turnClassifierPrompt({ utterance: 'A', recentConversation: '' });
+		assert.match(turn, /Never fill in "那个 PR".*from something that came up earlier in a different request/);
+		assert.match(turn, /If it asks the user something about this request .* decide none/);
+		assert.match(turn, /A fragment that is not a sentence .* is none/);
+		assert.match(workCheckPrompt({ task: 't', recentConversation: '' }), /Do NOT fill it in from a PR, file or meeting that came up earlier in a different request: ask/);
+	});
+
 	it('the voice agent hands every real user turn to the relay agent', () => {
 		const agentSrc = readFileSync(join(import.meta.dirname ?? '.', '..', 'src', 'voice-agent.ts'), 'utf-8');
 		assert.match(agentSrc, /relayAgent\.onUserTurn\(item\.content\)/);
