@@ -109,7 +109,7 @@ DEVICE_ENV_VAR = "AG2_DEVICE_ENV"
 # The HTTP path segment that names the legacy row, whose instance is "" (an empty segment is dropped).
 LEGACY_PATH_SEGMENT = "legacy"
 # Fixed names on the HTTP resource: a row so named could never be addressed there.
-RESERVED_INSTANCES = ("known-servers", "token", "park-legacy", LEGACY_PATH_SEGMENT)
+RESERVED_INSTANCES = ("known-servers", "token", "park-legacy", "move", LEGACY_PATH_SEGMENT)
 _ENV_VAR_RE = re.compile(r"^AG2_REMOTE_TOKEN_([A-Za-z0-9_]+)$")
 _MXID_RE = re.compile(r"^@[^:]+:([A-Za-z0-9.-]+)(?::\d+)?$")
 # Matched whole: a gateway's whoami is a new input, and its id reaches a process environment.
@@ -908,6 +908,11 @@ def _atomic_json(path: Path, payload: dict) -> None:
     body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if len(body.encode("utf-8")) > MAX_BYTES:
         raise SchemaError(f"{path.name}: record would exceed the {MAX_BYTES}-byte bound")
+    _atomic_text(path, body)
+
+
+def _atomic_text(path: Path, body: str) -> None:
+    """Publish `body` at `path` by a 0600 temp file + fsync + `os.replace`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
@@ -2798,3 +2803,297 @@ def _updated_row(rec: dict, row: dict, seen: Mapping[str, object], instance: str
     trial = [candidate if r is row else r for r in rec["rows"]]
     _validate({"schema_version": SCHEMA_VERSION, "connections": trial, REMOVED_KEY: rec[REMOVED_KEY]})
     return candidate
+
+
+# ── move: reuse the agent's secret on its server's successor ─────────────────
+
+MOVE_REASONS = ("no_successor", "no_token", "auth_rejected", "unverified", "agent_mismatch", "successor_exists")
+MCP_DESCRIPTOR_NAME = "ag2-mcp.json"
+MOVE_ENV_FILE = "relay-client.env"
+
+
+class MoveRefused(ConnectionsError):
+    """`try_reuse_move` cannot reuse the secret; `reason` is one of MOVE_REASONS."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason, self.detail = reason, detail
+
+
+def _dotspace():
+    try:
+        import dotspace  # type: ignore
+        return dotspace
+    except Exception:  # noqa: BLE001 - without the resolver no server has a successor
+        return None
+
+
+def _space(name: str, space_of=None):
+    """The registered DotSpace of `name`, from config alone unless `space_of` is injected."""
+    if space_of is not None:
+        return space_of(name)
+    ds = _dotspace()
+    return ds.dotspace_for(name, fetch=ds.NO_FETCH) if ds is not None else None
+
+
+def successor_server(server: str, space_of=None) -> str:
+    """The DotSpace `server` moves to by the resolver's mapping; '' when it has none."""
+    ds = _dotspace()
+    found = _space(server, space_of) if ds is not None and server else None
+    return ds.SUCCESSOR_SERVER if found is not None and found.server == ds.LEGACY_SERVER else ""
+
+
+def _successor_space(server: str, space_of=None):
+    target = successor_server(server, space_of)
+    found = _space(target, space_of) if target else None
+    if found is None or not found.gateway_host:
+        raise MoveRefused("no_successor", f"{server or 'this server'} has no successor DotSpace")
+    return found
+
+
+def successor_code(row: Mapping[str, object], environ: Optional[Mapping[str, str]] = None, *, vault=None,
+                   space_of=None) -> str:
+    """The row's own secret behind its successor's gateway: the same path on the successor's
+    registered gateway host. `MoveRefused` no_successor / no_token; the secret is never logged."""
+    space = _successor_space(str(row.get("server") or ""), space_of)
+    try:
+        _, token = connection_credential(row, environ, vault=vault)
+    except NoConnectionForRoom:
+        raise MoveRefused("no_token", f"no token for connection {row['instance'] or '(legacy)'}") from None
+    secret = secret_of(token) if gateway_url_of(token) else token.strip()
+    path = urllib.parse.urlsplit(str(row["gateway_url"])).path.rstrip("/")
+    return urllib.parse.urlunsplit(("https", space.gateway_host, path, "", "")) + "|" + secret
+
+
+def _move_source(rows: list, instance: Optional[str], space_of=None) -> dict:
+    """The row to move: `instance` when named, else the primary on a server with a successor, else
+    the legacy row, else the first row on such a server."""
+    if instance is not None:
+        return _find(rows, instance)
+    movable = [r for r in rows if successor_server(r["server"], space_of)]
+    for pick in ([r for r in movable if r["primary"]], [r for r in movable if not r["instance"]], movable):
+        if pick:
+            return pick[0]
+    raise MoveRefused("no_successor", "no connection is on a server with a successor")
+
+
+def _localpart(mxid: object) -> str:
+    return str(mxid).partition(":")[0] if isinstance(mxid, str) and server_of_mxid(mxid) else ""
+
+
+def _old_identity(row: Mapping[str, object], environ, vault, probe: dict) -> "tuple[str, str]":
+    """(agent, owner) the old row answers to: what it learned, else a verified preview of its own
+    token; ("", "") when neither names an agent."""
+    if row.get("agent_mxid"):
+        return str(row["agent_mxid"]), str(row.get("owner_mxid") or "")
+    try:
+        _, token = connection_credential(row, environ, vault=vault)
+        seen = preview_connection(token, **probe)
+    except ConnectionsError:
+        return "", ""
+    if not (seen.get("verified") and seen.get("agent_mxid")):
+        return "", ""
+    return str(seen["agent_mxid"]), str(seen.get("owner_mxid") or "")
+
+
+def _env_file_with(path: Path, key: str, value: str) -> str:
+    """`path`'s lines with `key` set to `value`, single-quoted so a shell that sources the file
+    never runs what follows the `|` (every other line kept)."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    keep = [ln for ln in lines if ln.strip().removeprefix("export ").partition("=")[0].strip() != key]
+    return "\n".join(keep + [f"{key}='{value}'"]) + "\n"
+
+
+def mcp_descriptor_path(workspace: Optional[Path], mcp_config: Optional[Path] = None) -> Path:
+    """The agent MCP descriptor a terminal-run core reads: the `AG2_MCP_DESCRIPTOR` its Claude Code
+    MCP config (`mcp_config`, default `<claude home>/.claude.json`) names inside the workspace, else
+    `state/ag2-mcp.json`. A descriptor outside the workspace is the desktop host's and never chosen."""
+    ws = _workspace(workspace).resolve()
+    if mcp_config is None:
+        from util_paths import claude_home_path
+        mcp_config = claude_home_path(".claude.json")
+    try:
+        servers = json.loads(Path(mcp_config).read_text(encoding="utf-8")).get("mcpServers") or {}
+    except (OSError, ValueError, AttributeError):
+        servers = {}
+    for entry in servers.values() if isinstance(servers, dict) else []:
+        named = (entry.get("env") or {}).get("AG2_MCP_DESCRIPTOR") if isinstance(entry, dict) else None
+        if isinstance(named, str) and named and Path(named).resolve().is_relative_to(ws):
+            return Path(named)
+    return ws / "state" / MCP_DESCRIPTOR_NAME
+
+
+def repoint_mcp_descriptor(path: Path, *, legacy: str, code: str, agent_mxid: str,
+                           env_file: Path, dry_run: bool = False, space_of=None) -> str:
+    """Re-point the descriptor at `path` from `legacy` to its successor: mint and MCP URLs from the
+    successor's DotSpace, `relay` the code's gateway, `agent_id` the moved agent, `env_file` a 0600
+    file holding `code` under the descriptor's `env_key` (`bearer_digest` kept, the secret being the
+    same); the old descriptor is kept beside it as `.bak-<legacy slug>`. Returns absent, unreadable,
+    unchanged, no_successor_endpoints, would_repoint, repointed or write_failed."""
+    if not path.is_file():
+        return "absent"
+    try:
+        raw = path.read_bytes()
+        desc = json.loads(raw)
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(desc, dict):
+        return "unreadable"
+    on_legacy = [u for u in (desc.get("mint_url"), desc.get("mcp_url"), desc.get("relay")) if isinstance(u, str)
+                 and getattr(_space(host_of_url(u), space_of), "server", "") == legacy]
+    if not on_legacy:
+        return "unchanged"
+    space = _successor_space(legacy, space_of)
+    mint_path = urllib.parse.urlsplit(str(desc.get("mint_url") or "")).path
+    if not space.mcp_url or not mint_path:
+        return "no_successor_endpoints"
+    if dry_run:
+        return "would_repoint"
+    key = str(desc.get("env_key") or PRIMARY_TOKEN_REF)
+    digest = hashlib.sha256(secret_of(code).encode()).hexdigest()
+    try:
+        _atomic_text(env_file, _env_file_with(env_file, key, code))
+        backup = path.with_name(f"{path.name}.bak-{instance_for(legacy)}")
+        if not backup.exists():
+            _atomic_text(backup, raw.decode("utf-8"))
+        desc.update(env_file=str(env_file), env_key=key, agent_id=agent_mxid, mcp_url=space.mcp_url,
+                    mint_url=urllib.parse.urlunsplit(("https", space.gateway_host, mint_path, "", "")))
+        if "relay" in desc:
+            desc["relay"] = gateway_url_of(code)
+        if desc.get("bearer_digest") not in (None, digest):
+            desc.pop("bearer_digest")
+        _atomic_json(path, desc)
+    except (OSError, UnicodeDecodeError, ConnectionsError):
+        return "write_failed"
+    return "repointed"
+
+
+def mirror_room_bindings(bindings: Mapping[str, str], legacy: str, successor: str,
+                         bind: Optional[Callable[[str, str], object]]) -> list:
+    """Bind each `legacy` room's successor twin (same localpart) to the worker its legacy room is
+    bound to, unless the twin already has a binding; one {room, twin, worker, error} per twin.
+    `bind` None only plans."""
+    out = []
+    for room, worker in sorted(bindings.items()):
+        local, sep, server = str(room).partition(":")
+        if not sep or not local.startswith("!") or server != legacy:
+            continue
+        twin = f"{local}:{successor}"
+        if twin in bindings:
+            continue
+        entry = {"room": room, "twin": twin, "worker": worker, "error": None}
+        if bind is not None:
+            try:
+                bind(twin, worker)
+            except Exception as e:  # noqa: BLE001 - one refused binding never undoes the move
+                entry["error"] = type(e).__name__
+        out.append(entry)
+    return out
+
+
+class _ScriptRoomBindings:
+    """`load()` and `bind(room, worker)` through a roster module the caller located."""
+
+    def __init__(self, module, workspace):
+        self._m, self._ws = module, workspace
+
+    def load(self) -> dict:
+        return dict(self._m.load_bindings(self._ws))
+
+    def bind(self, room: str, worker: str) -> None:
+        self._m.bind_room(self._ws, room, worker)
+
+
+def room_bindings_from_script(script: Path, workspace: Optional[Path]):
+    """Room bindings through the roster module at `script` (its `roster_path`, `load_bindings` and
+    `bind_room`); None when the script is absent or its roster is not written yet."""
+    script = Path(script)
+    if not script.is_file():
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"_room_bindings_{script.stem}", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ws = _workspace(workspace)
+    return _ScriptRoomBindings(module, ws) if module.roster_path(ws).is_file() else None
+
+
+def try_reuse_move(instance: Optional[str] = None, *, repo: Optional[Path] = None, logs_dir: Optional[Path] = None,
+                   workspace: Optional[Path] = None, environ: Optional[Mapping[str, str]] = None, vault=None,
+                   fetch=None, whoami=None, getaddrinfo=None, resolver=None, spawn=None, kill=None,
+                   added_by: str = "owner", dry_run: bool = False, channels_home: Optional[Path] = None,
+                   mcp_config: Optional[Path] = None, room_bindings=None) -> dict:
+    """Move a connection to its server's successor with the agent's existing secret (a registry
+    copied byte-for-byte keeps it valid until either side re-codes the agent).
+
+    The successor code (`successor_code`) must preview verified for the old row's agent localpart on
+    the successor server; then the row is added (`skip_backlog`), promoted, the MCP descriptor
+    re-pointed (`mcp_descriptor_path`) and each legacy worker-room binding mirrored through `room_bindings` (an object with
+    `load() -> {room: worker}` and `bind(room, worker)`, None when the worker pool is absent).
+    An existing successor row for the same agent (a move whose promote failed) is resumed, not
+    refused. `resolver` (as `preview_connection`'s) also maps servers; None reads the registry offline.
+    Returns {ok, instance, agent_mxid, mcp, rooms, dry_run}, or {ok: False, reason, detail} with a
+    MOVE_REASONS reason (nothing written) or a Refusal code (`added` says whether the row exists),
+    and `server`, the successor a connect code should come from."""
+    environ = os.environ if environ is None else environ
+    probe = dict(fetch=fetch, whoami=whoami, getaddrinfo=getaddrinfo, resolver=resolver)
+    ds = _dotspace()
+    target = ds.SUCCESSOR_SERVER if ds is not None else ""
+    try:
+        rows = read_rows(workspace)
+        old = _move_source(rows, instance, resolver)
+        code = successor_code(old, environ, vault=vault, space_of=resolver)
+        seen = preview_connection(code, **probe)
+        target = successor_server(old["server"], resolver)
+        if seen.get("authenticated") is False:
+            raise MoveRefused("auth_rejected", f"{target} does not accept this agent's existing secret")
+        if not seen.get("verified"):
+            raise MoveRefused("unverified", str(seen.get("error") or f"{target} did not name the agent"))
+        new_agent, (mine, owner) = str(seen["agent_mxid"]), _old_identity(old, environ, vault, probe)
+        if not mine:
+            raise MoveRefused("unverified", f"{old['server']} no longer names this connection's agent")
+        theirs = str(seen.get("owner_mxid") or "")
+        if seen.get("server") != target or server_of_mxid(new_agent) != target \
+                or _localpart(mine) != _localpart(new_agent) or (owner and theirs and _localpart(owner) != _localpart(theirs)):
+            raise MoveRefused("agent_mismatch", f"{target} names {new_agent}, not {mine}")
+        taken = next((r for r in rows if r["server"] == target), None)
+        if taken is not None and taken.get("agent_mxid") != new_agent:
+            raise MoveRefused("successor_exists", f"connection {taken['instance']} is already on {target}")
+    except MoveRefused as e:
+        return {"ok": False, "reason": e.reason, "detail": e.detail, "added": False, "server": target}
+    inst = str(taken["instance"]) if taken is not None else instance_for(target)
+    channels = Path(channels_home) if channels_home is not None else None
+    if channels is None:
+        from util_paths import claude_home_path
+        channels = claude_home_path("channels")
+    env_file = channels / channel_dir_for(inst, environ) / MOVE_ENV_FILE
+    legacy = str(old["server"])
+    out = {"ok": True, "instance": inst, "agent_mxid": new_agent, "dry_run": dry_run, "from": old["instance"]}
+    out["resumed"] = taken is not None
+    descriptor = mcp_descriptor_path(workspace, mcp_config)
+    bindings = room_bindings.load() if room_bindings is not None else {}
+    if dry_run:
+        out.update(mcp=repoint_mcp_descriptor(descriptor, legacy=legacy, code=code, agent_mxid=new_agent,
+                                              env_file=env_file, dry_run=True, space_of=resolver),
+                   rooms=mirror_room_bindings(bindings, legacy, target, None))
+        return out
+    try:
+        row = taken if taken is not None else add_connection(
+            code, added_by=added_by, expected_server=target, preview=seen, workspace=workspace, vault=vault,
+            environ=environ, kill=kill, skip_backlog=True)[0]
+    except Refusal as e:
+        return {"ok": False, "reason": e.CODE, "detail": str(e), "added": False, "server": target}
+    try:
+        promote(str(row["instance"]), repo=repo, logs_dir=logs_dir, environ=environ, workspace=workspace,
+                vault=vault, spawn=spawn, kill=kill)
+    except Refusal as e:
+        return {"ok": False, "reason": e.CODE, "detail": str(e), "added": True, "server": target,
+                "instance": row["instance"]}
+    out["mcp"] = repoint_mcp_descriptor(descriptor, legacy=legacy, code=code, agent_mxid=new_agent,
+                                        env_file=env_file, space_of=resolver)
+    out["rooms"] = mirror_room_bindings(bindings, legacy, target,
+                                        room_bindings.bind if room_bindings is not None else None)
+    return out
