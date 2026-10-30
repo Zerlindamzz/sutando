@@ -87,8 +87,8 @@ STUB = textwrap.dedent('''
 
 
 TOUR = ["Your DM", "Rooms", "Commons", "Connect other agents", "Teamwork", "Calls & voice",
-        "Connect your apps", "Activity & notices", "Mobile"]
-FINALE = "You\u2019re set \u2014 ask Blue anything"
+        "Connect your apps", "Activity & notices", "Get the mobile app", "Mobile"]
+FINALE = "You\u2019re set. Ask Blue anything"
 IMPORT = "Import your Claude Code history"
 
 
@@ -125,9 +125,9 @@ def steps(page):
 
 
 class RenderTest(unittest.TestCase):
-    def test_tour_has_all_nine_sections_in_order(self):
+    def test_tour_has_all_ten_sections_in_order(self):
         for core in gs.CORES:
-            self.assertEqual(steps(gs.render_page("Blue", core))[:9], TOUR)
+            self.assertEqual(steps(gs.render_page("Blue", core))[:10], TOUR)
         self.assertLess(TOUR.index("Connect other agents"), TOUR.index("Teamwork"))
 
     def test_import_section_only_on_a_claude_core(self):
@@ -176,7 +176,7 @@ class RenderTest(unittest.TestCase):
         page = gs.render_page("Blue", "codex")
         self.assertNotRegex(page, r"Step \d+ of \d+")
         self.assertIn('<p class="step-title"><span id="step-title">Your DM</span>'
-                      '<span class="pos" id="step-pos" aria-hidden="true">1/9</span></p>', page)
+                      '<span class="pos" id="step-pos" aria-hidden="true">1/10</span></p>', page)
         self.assertNotRegex(page, r'id="step-title"[^>]*aria-live')  # announced once, by heading focus
         self.assertIn("stepPos.textContent = (cur + 1) + '/' + ids.length", gs.tour_page.SCRIPT)
         self.assertIn("stepTitle.textContent = titles[cur]", gs.tour_page.SCRIPT)
@@ -204,7 +204,7 @@ class RenderTest(unittest.TestCase):
     def test_room_audience_says_your_agent(self):
         room = gs.render_page("Blue", "claude", "room")
         self.assertIn("<h1>Getting started with your agent</h1>", room)
-        self.assertIn("ask your agent anything", room)
+        self.assertIn("Ask your agent anything", room)
         self.assertNotIn("Blue", re.sub(r'src="data:[^"]*"', "", room))
         dm = gs.render_page("Blue", "claude", "dm")
         self.assertIn("<h1>Getting started with Blue</h1>", dm)
@@ -256,10 +256,10 @@ class InteractiveTest(unittest.TestCase):
 
     def test_tour_controls_and_progress(self):
         for marker in ('id="back"', 'id="next"', 'id="all"', 'id="dots"', 'aria-pressed="false"',
-                       'role="progressbar"', 'aria-valuemax="10"', "0 of 10 done", 'aria-label="Tour steps"'):
+                       'role="progressbar"', 'aria-valuemax="11"', "0 of 11 done", 'aria-label="Tour steps"'):
             self.assertIn(marker, self.page)
-        self.assertEqual(self.page.count('type="checkbox" data-done='), 10)
-        self.assertEqual(self.page.count("Mark done"), 10)
+        self.assertEqual(self.page.count('type="checkbox" data-done='), 11)
+        self.assertEqual(self.page.count("Mark done"), 11)
         self.assertIn("ArrowRight", self.page)
 
     def test_js_class_is_set_in_head_and_no_js_shows_every_section(self):
@@ -283,8 +283,8 @@ class InteractiveTest(unittest.TestCase):
         self.assertIn("await art.state.set(store.key, v)", gs.tour_page.SCRIPT)
 
     def test_checkboxes_start_disabled_until_progress_loads(self):
-        self.assertEqual(self.page.count('data-done="'), 10)
-        self.assertEqual(len(re.findall(r'type="checkbox" data-done="[a-z]+" disabled>', self.page)), 10)
+        self.assertEqual(self.page.count('data-done="'), 11)
+        self.assertEqual(len(re.findall(r'type="checkbox" data-done="[a-z]+" disabled>', self.page)), 11)
         self.assertIn("b.disabled = false", gs.tour_page.SCRIPT)
 
     def test_show_all_toggle_keeps_one_label(self):
@@ -309,7 +309,7 @@ class InteractiveTest(unittest.TestCase):
         self.assertNotIn('role="img"', self.page)
 
     def test_an_svg_per_section_and_a_hero(self):
-        self.assertEqual(self.page.count('<div class="icon" aria-hidden="true"><svg'), 10)
+        self.assertEqual(self.page.count('<div class="icon" aria-hidden="true"><svg'), 11)
         self.assertIn('class="hero-art"', self.page)
         self.assertEqual(set(gs.tour_page.ICONS), {s.id for s in gs.sections_for("claude")})
 

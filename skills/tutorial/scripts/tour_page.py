@@ -104,6 +104,7 @@ ACCENTS = {
     "agents": ("#8f5600", "#f2b24c"),
     "apps": ("#0a6f91", "#5cc8ee"),
     "activity": ("#b0286c", "#ff7ab8"),
+    "phone": ("#3e4dc9", "#98a4ff"),
     "mobile": ("#3e4dc9", "#98a4ff"),
     "import": ("#566410", "#c3d65a"),
 }
@@ -139,23 +140,22 @@ ICONS = {
                 f'<circle cx="46" cy="16" r="9" fill="currentColor"/>',
     "mobile": f'<rect {_S} x="18" y="4" width="28" height="56" rx="6"/><path {_S} d="M28 52h8"/>'
               f'<path {_S} d="M24 16h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-9l-5 4v-4h-2a2 2 0 0 1-2-2V18a2 2 0 0 1 2-2z"/>',
+    "phone": f'<rect {_S} x="18" y="4" width="28" height="56" rx="6"/><path {_S} d="M28 52h8"/>'
+                  f'<path {_S} d="M32 14v22M24 28l8 8 8-8"/>',
     "import": f'<path {_S} d="M6 22a4 4 0 0 1 4-4h12l5 5h27a4 4 0 0 1 4 4v24a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4z"/>'
               f'<path {_S} d="M32 4v26M24 22l8 8 8-8"/>',
 }
 DEFAULT_ICON = f'<path {_S} d="M32 6l6 16 16 6-16 6-6 16-6-16-16-6 16-6z"/>'
 
+# The AG2 Space client's own Sutando avatar (its second built-in variant), as the client renders it.
 HERO = (
-    '<svg class="hero-art" viewBox="0 0 200 120" aria-hidden="true" focusable="false">'
-    '<circle cx="100" cy="60" r="56" fill="var(--hero-ring)"/>'
-    f'<g style="color:var(--a-rooms)"><circle {_S} cx="66" cy="46" r="12"/>'
-    f'<path {_S} d="M44 92c3-18 41-18 44 0"/></g>'
-    f'<g style="color:var(--a-teamwork)"><rect {_S} x="114" y="36" width="34" height="28" rx="8"/>'
-    '<circle cx="124" cy="50" r="3" fill="currentColor"/><circle cx="138" cy="50" r="3" fill="currentColor"/>'
-    f'<path {_S} d="M131 36v-8"/><circle cx="131" cy="25" r="3" fill="currentColor"/>'
-    f'<path {_S} d="M112 92c2-16 36-16 38 0"/><path {_S} d="M150 60l10-8"/></g>'
-    f'<g style="color:var(--a-agents)"><path {_S} d="M92 26l3-7 3 7 7 3-7 3-3 7-3-7-7-3z"/></g>'
-    f'<g style="color:var(--a-activity)"><path {_S} d="M168 26l2-4 2 4 4 2-4 2-2 4-2-4-4-2z"/></g>'
-    '</svg>'
+    '<svg class="hero-art" viewBox="0 0 36 36" fill="none" aria-hidden="true" focusable="false">'
+    '<rect width="36" height="36" fill="#f0e345"/>'
+    '<rect x="0" y="0" width="36" height="36" transform="translate(-5 -5) rotate(49 18 18) scale(1.1)" '
+    'fill="#f9a358" rx="36"/><g transform="translate(-1 -2) rotate(-9 18 18)">'
+    '<path d="M15 20c2 1 4 1 6 0" stroke="#100f0e" fill="none" stroke-linecap="round"/>'
+    '<rect x="10" y="14" width="1.5" height="2" rx="1" stroke="none" fill="#100f0e"/>'
+    '<rect x="24" y="14" width="1.5" height="2" rx="1" stroke="none" fill="#100f0e"/></g></svg>'
 )
 
 
@@ -452,7 +452,7 @@ def _finale(who: str, prompts: Dict[str, str]) -> str:
     return (
         '<section class="card finale" id="finale" aria-labelledby="h-finale" hidden '
         'style="--accent:var(--brand)"><div class="body">'
-        f'<h2 id="h-finale" tabindex="-1">You&rsquo;re set &mdash; ask {who} anything</h2>'
+        f'<h2 id="h-finale" tabindex="-1">You&rsquo;re set. Ask {who} anything</h2>'
         f'<p class="how">That was the whole tour. Start with something real:</p>'
         f'{_prompt("finale", prompts.get("finale", FINALE_PROMPT), "dm")}</div></section>'
     )
@@ -477,7 +477,8 @@ STYLE = """<style>
   --ink:#1c1b1c; --orange-in:#f9a75c; --orange-out:#f26a21; --yellow-in:#f0e24a; --yellow-out:#ea931f;
   --pink-in:#f8cbfb; --pink-out:#f38c64; --pill-bg:var(--ink); --pill-fg:#ffffff;
   --shadow:0 1px 2px rgba(28,27,28,.04), 0 12px 32px rgba(28,27,28,.06); --orb-alpha:.5;
-  --sans:"Haas Recast Open", "Haas Recast", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  --sans:"Haas Recast", "Haas Recast Dense", "Haas Recast Open", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  --display:"Avantt", "Avantt SemiBold", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
   %(light)s }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { %(darkvars)s }
@@ -496,9 +497,9 @@ main { max-width:780px; margin:0 auto; padding:28px 16px 56px; }
 .hero::after { width:130px; height:190px; right:70px; bottom:-160px; transform:rotate(40deg); animation-duration:19s; animation-delay:-7s;
   background:radial-gradient(closest-side, var(--pink-in) 40%%, var(--pink-out) 100%%); }
 .hero > div { position:relative; }
-.hero-art { width:150px; flex:none; position:relative; }
-h1 { font:600 clamp(30px, 5vw, 46px)/1.02 var(--sans); letter-spacing:-.03em; margin:0 0 10px; }
-h2 { font:600 22px/1.2 var(--sans); letter-spacing:-.02em; margin:0 0 6px; }
+.hero-art { width:120px; height:120px; flex:none; position:relative; border-radius:50%%; overflow:hidden; }
+h1 { font:600 clamp(30px, 5vw, 46px)/1.02 var(--display); letter-spacing:-.03em; margin:0 0 10px; }
+h2 { font:600 22px/1.2 var(--display); letter-spacing:-.02em; margin:0 0 6px; }
 p { margin:0 0 6px; }
 .lead, .how { color:var(--muted); }
 .lead { font-size:17px; line-height:1.5; max-width:34em; }
@@ -561,7 +562,7 @@ button:focus-visible, input:focus-visible { outline:2px solid var(--fg); outline
 }
 @media (max-width: 520px) {
   .hero { flex-direction:column; align-items:flex-start; padding:22px 18px; }
-  .hero-art { width:112px; }
+  .hero-art { width:88px; height:88px; }
   .card { flex-direction:column; gap:12px; padding:20px 18px; border-radius:22px; }
   .icon { width:56px; height:56px; border-radius:16px; }
   .icon svg { width:38px; height:38px; }
@@ -807,6 +808,8 @@ def render_page(name: str, core: str = "unknown", audience: str = "dm", agent: O
     if audience not in AUDIENCES:
         raise ValueError(f"audience must be one of {', '.join(AUDIENCES)}, got {audience!r}")
     who = html.escape(clean_name(name)) if audience == "dm" else "your agent"
+    lead = (f"A quick tour with your personal native agent, {who}. Try one thing in each part."
+            if audience == "dm" else "A quick tour. Try one thing in each part.")
     secs = sections_for(core, features)
     body = "".join(_section(s, i == 0, who, prompts, media) for i, s in enumerate(secs))
     light, dark = _palette(tuple(s.id for s in features.steps if s.id not in ACCENTS))
@@ -816,8 +819,7 @@ def render_page(name: str, core: str = "unknown", audience: str = "dm", agent: O
         f"<title>{PAGE_TITLE}</title>{HEAD_SCRIPT}{STYLE % {'light': light, 'darkvars': dark}}</head><body>"
         "<main id=\"tour\" data-mode=\"step\">"
         f"<header class=\"hero\">{HERO}<div><h1>Getting started with {who}</h1>"
-        f"<p class=\"lead\">A short tour of s.space. Each part has one thing to try; Copy puts "
-        f"a prompt on your clipboard to paste into a chat with {who}.</p>{picked}</div></header>"
+        f"<p class=\"lead\">{lead}</p>{picked}</div></header>"
         "<div class=\"progress\"><div class=\"progress-label\" id=\"progress-label\" aria-hidden=\"true\">"
         f"0 of {len(secs)} done</div>"
         f"<div class=\"bar\" id=\"progress-bar\" role=\"progressbar\" aria-label=\"Tour progress\" "

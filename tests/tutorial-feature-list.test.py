@@ -32,61 +32,50 @@ base_spec.loader.exec_module(base)  # isolates the environment and loads getting
 gs, tp = base.gs, base.gs.tour_page
 Section = tp.Section
 
-# --- fixture: the sections as tour_page.py hard-coded them before the list existed ---------------
+# --- fixture: the bundled list's sections as Section literals, rendered without the list -------
 OLD_SECTIONS = [
     Section("dm", "Your DM",
-            "Your DM with {name} is where you ask for things for yourself. What you ask for "
-            "yourself (research, mail, calendar) comes back in your DM, never in a room.",
+            "Your DM with {name} is where you ask for things for yourself. What you ask for yourself (research, mail, calendar) comes back in your DM, never in a room.",
             "Ask {name} in your DM:",
             "What can you do for me today?", "dm"),
     Section("rooms", "Rooms",
             "Humans and agents talk in the same chat.",
-            "Press + at the top of the room list and choose Room. Then open the room menu "
-            "(&#8942;), choose Invite, and add {name}.",
-            images=(("room-list-add.jpg", "The + button at the top of the room list"),
-                    ("new-room-dialog.jpg", "The New Chat Room dialog"),
-                    ("room-menu-invite.jpg", "The room menu, with Invite"))),
+            "Press + at the top of the room list and choose Room. Name it and pick {name} under AI stands you own, or later open the room menu (&#8942;), choose Invite, and add {name}.",
+            images=(("room-list-add.jpg", "The + menu at the top of the room list"), ("new-room-dialog.jpg", "The New Chat Room dialog, with your agent under AI stands you own"), ("room-menu-invite.jpg", "The room menu, with Invite"))),
     Section("commons", "Commons",
-            "Each room's shared Docs, HTML pages, PDFs, whiteboards, sheets and databases. Open them "
-            "with the Commons icon in the room header.",
+            "Each room's shared Docs, HTML pages, PDFs, whiteboards, sheets and databases. Open them with the Commons button at the right of the room header.",
             "Ask {name} in a room:",
             "Make a plan for our team offsite in Commons.", "room",
-            (("room-header-commons.jpg", "The room header; Commons is the second icon"),
-             ("commons-surfaces.jpg", "Commons: Doc, Whiteboard, HTML, PDF, Sheet and Database"))),
+            (("room-header-commons.jpg", "The Commons button at the right of the room header"), ("commons-surfaces.jpg", "Commons: Doc, Whiteboard, HTML, PDF, Figma, Sheet and Database"))),
     Section("agents", "Connect other agents",
             "Bring agents from the apps you already use into your rooms.",
-            "Press + at the top of the room list, choose Agent, then Use an agent from another app, "
-            "and pick the app you already use: Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok) or "
-            "Muse (by Meta)."),
+            "Press + at the top of the room list, choose Agent, then Use an agent from another app and Continue. Pick the app you already use: Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok) or Muse (by Meta), or Other for any app with connectors. Give the agent a name, then connect it inside that app and sign in.",
+            images=(("add-agent-dialog.jpg", "Add an agent, with Use an agent from another app"), ("which-agent.jpg", "Which agent? Dot, Grok Bot, Muse or Other"))),
     Section("teamwork", "Teamwork",
             "@-mention any agent in a room to hand it work; it replies in the thread.",
-            "In a room with another agent, type @ and ask {name}:",
-            "Research the three best note-taking apps for a small team, then ask another agent "
-            "in this room to review your answer.", "room",
-            (("composer-mention.jpg", "The @ button in the message composer"),)),
+            "In a room with another agent, type @ in the message box, pick {name} from the Mentions list, and ask:",
+            "Research the three best note-taking apps for a small team, then ask another agent in this room to review your answer.", "room",
+            (("mention-list.jpg", "Typing @ in the message box opens the Mentions list"),)),
     Section("calls", "Calls &amp; voice",
             "Talk live with {name} in your DM, or with people in any room.",
-            "Press the headphone icon in the room header (Start call). In your DM, {name} answers; "
-            "in a room, start the call and pick your agent under &ldquo;Bring an agent?&rdquo;.",
+            "Press the headphone icon in the room header (Start call). In your DM, {name} answers; in a room, start the call and pick your agent under &ldquo;Bring an agent?&rdquo;.",
             images=(("room-header-call.jpg", "The headphone icon in the room header"),)),
     Section("apps", "Connect your apps",
             "Gmail, Calendar, Drive, Slack and more, so {name} can work with your real data.",
-            "Press the plug icon in your user card (bottom left) to open Settings &rarr; "
-            "Integrations, or ask {name} and a Connect button appears:",
+            "Click your avatar at the bottom left and choose Apps to open Settings &rarr; Connected apps, or ask {name} and a Connect button appears:",
             tp.CONNECT_PROMPT, "dm",
-            (("user-card-plug.jpg", "The plug icon in your user card"),
-             ("settings-integrations.jpg", "Settings → Apps → Integrations"))),
+            (("settings-integrations.jpg", "Settings → Apps → Connected apps"),)),
     Section("activity", "Activity &amp; notices",
-            "The bell at the top of the room list and each room's Activity tab show what needs "
-            "you and what your agents are working on. The unread badge follows each room's "
-            "notification setting.",
-            "Try it: open a room's Activity tab while an agent works on something you asked for, "
-            "then open the room menu (&#8942;), choose Notifications, and pick Mention &amp; Keywords.",
+            "The bell at the top of the room list and each room's Activity tab show what needs you and what your agents are working on. The unread badge follows each room's notification setting.",
+            "Try it: open a room's Activity tab while an agent works on something you asked for, then open the room menu (&#8942;), choose Notifications, and pick Mention &amp; Keywords.",
             images=(("room-list-top.jpg", "The bell at the top of the room list"),)),
+    Section("phone", "Get the mobile app",
+            "Take your rooms and agents with you: first, put the app on your phone.",
+            "Download the mobile app from your phone&rsquo;s app store and open it. You pair it with this computer in the next step."),
     Section("mobile", "Mobile",
             "The same rooms and agents on your phone.",
-            "Pair it in Settings &rarr; Mobile pairing.",
-            images=(("mobile-pairing.jpg", "Settings: Mobile pairing"),)),
+            "Click your avatar at the bottom left to open your account menu (User, Agent, Apps, Appearance, Mobile pairing, Notifications, Plan &amp; usage), choose Mobile pairing, and scan the code with the mobile app on your phone.",
+            images=(("mobile-pairing.jpg", "Settings: Mobile pairing, with the code to scan"),)),
 ]
 OLD_IMPORT_SECTION = Section(
     "import", "Import your Claude Code history",
@@ -112,8 +101,9 @@ MXC_OF = {name: f"mxc://ag2.example/{i:02d}{name.replace('-', '')}" for i, name 
 # test_a_rendered_change_needs_a_revision_bump until `revision` is bumped and its key added here.
 RENDERED_AT = {
     "tutorial.2026-10-23.1": "3b15c27a9160728fa8c3bd1da5693cdd5ec81d16064ada057888b7781dec32d8",
+    "tutorial.2026-10-30.1": "feaeabb8abeb90bb7a4a2281ffbe192c34790451801894534722b2418895e640",
 }
-STEP_IDS = ["dm", "rooms", "commons", "agents", "teamwork", "calls", "apps", "activity", "mobile", "import"]
+STEP_IDS = ["dm", "rooms", "commons", "agents", "teamwork", "calls", "apps", "activity", "phone", "mobile", "import"]
 ASSET_CAP = 60_000
 PAGE_CAP = 300_000
 
@@ -201,7 +191,7 @@ class LosslessTest(unittest.TestCase):
         by = {s.id: s for s in tp.FEATURES.steps}
         self.assertEqual(by["import"].runtime, "claude")
         self.assertTrue(all(s.runtime is None for s in tp.FEATURES.steps if s.id != "import"))
-        self.assertEqual({s.since_release for s in tp.FEATURES.steps}, {"2026-10-15"})
+        self.assertEqual({s.since_release for s in tp.FEATURES.steps}, {"2026-10-15", "2026-10-30"})
         self.assertEqual(tp.PROMPT_SLOTS, ("dm", "commons", "teamwork", "apps", "import", "finale"))
         self.assertEqual([s.id for s in tp.sections_for("codex")], STEP_IDS[:-1])
         self.assertEqual([s.id for s in tp.sections_for("claude")], STEP_IDS)
@@ -211,7 +201,7 @@ class LosslessTest(unittest.TestCase):
         self.assertEqual(set(raw["steps"][0]), {"id", "title", "body", "surface", "screenshot",
                                                  "since_release", "paste"})
         shots = [shot for s in raw["steps"] if s["screenshot"] for shot in s["screenshot"]]
-        self.assertEqual(len(shots), 11)
+        self.assertEqual(len(shots), 12)
         for shot in shots:
             self.assertEqual(set(shot), {"asset", "fallback_file", "alt"})
             self.assertEqual(shot["fallback_file"], f"assets/{shot['asset']}.jpg")  # today's names: the stems
@@ -409,20 +399,20 @@ class MediaTest(unittest.TestCase):
                                                                          "commons-surfaces"})
         self.assertEqual(tp.clean_media(["x"]), {})
         self.assertEqual(tp.clean_media(None), {})
-        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 11)
+        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 12)
 
     def test_a_mapped_asset_points_at_the_rooms_media_and_the_rest_stay_inlined(self):
         page = tp.render_page("Blue", "codex", media={"room-list-add": MXC_OF["room-list-add"]})
-        self.assertIn(f'<img src="{MXC_OF["room-list-add"]}" alt="The + button at the top of the room list" '
+        self.assertIn(f'<img src="{MXC_OF["room-list-add"]}" alt="The + menu at the top of the room list" '
                       'loading="lazy">', page)
-        self.assertEqual(page.count('<img src="data:image/jpeg;base64,'), 10)
+        self.assertEqual(page.count('<img src="data:image/jpeg;base64,'), 11)
         self.assertEqual(page.count('<img src="mxc://'), 1)
 
     def test_a_fully_mapped_page_shrinks_to_text(self):
         for core in tp.CORES:
             page = tp.render_page("Blue", core, "dm", "@kai.agent:example.test", media=MXC_OF)
             self.assertNotIn("data:image", page)
-            self.assertEqual(page.count('<img src="mxc://'), 11)
+            self.assertEqual(page.count('<img src="mxc://'), 12)
             self.assertLess(len(page.encode("utf-8")), 40_000, core)
 
     def test_without_media_the_page_is_the_fallback_page(self):
@@ -693,7 +683,7 @@ class ListOverrideTest(_Cli):
         got = json.loads(out)
         self.assertEqual((code, got["action"], got["media"]), (0, "created", ["room-list-add"]))
         self.assertIn(f'<img src="{MXC_OF["room-list-add"]}"', self.page_text())
-        self.assertEqual(self.page_text().count("data:image/jpeg"), 10)
+        self.assertEqual(self.page_text().count("data:image/jpeg"), 11)
         entry = gs.load_marker(gs.marker_path(self.tmp / "ws"))[self.ROOM]
         self.assertEqual(entry["media"], {"room-list-add": MXC_OF["room-list-add"]})
         code, out, _ = self.publish()  # the room keeps its media map

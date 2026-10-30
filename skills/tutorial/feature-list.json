@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "tutorial.2026-10-23.1",
+  "revision": "tutorial.2026-10-30.1",
   "steps": [
     {
       "id": "dm",
@@ -72,7 +72,18 @@
         "Press + at the top of the room list, choose Agent, then Use an agent from another app and Continue. Pick the app you already use: Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok) or Muse (by Meta), or Other for any app with connectors. Give the agent a name, then connect it inside that app and sign in."
       ],
       "surface": "room",
-      "screenshot": null,
+      "screenshot": [
+        {
+          "asset": "add-agent-dialog",
+          "fallback_file": "assets/add-agent-dialog.jpg",
+          "alt": "Add an agent, with Use an agent from another app"
+        },
+        {
+          "asset": "which-agent",
+          "fallback_file": "assets/which-agent.jpg",
+          "alt": "Which agent? Dot, Grok Bot, Muse or Other"
+        }
+      ],
       "since_release": "2026-10-15"
     },
     {
@@ -85,8 +96,8 @@
       "surface": "room",
       "screenshot": [
         {
-          "asset": "composer-mention",
-          "fallback_file": "assets/composer-mention.jpg",
+          "asset": "mention-list",
+          "fallback_file": "assets/mention-list.jpg",
           "alt": "Typing @ in the message box opens the Mentions list"
         }
       ],
@@ -118,15 +129,10 @@
       "title": "Connect your apps",
       "body": [
         "Gmail, Calendar, Drive, Slack and more, so {name} can work with your real data.",
-        "Click your name at the bottom left and choose Apps to open Settings &rarr; Connected apps, or ask {name} and a Connect button appears:"
+        "Click your avatar at the bottom left and choose Apps to open Settings &rarr; Connected apps, or ask {name} and a Connect button appears:"
       ],
       "surface": "dm",
       "screenshot": [
-        {
-          "asset": "user-card-plug",
-          "fallback_file": "assets/user-card-plug.jpg",
-          "alt": "Your user menu (bottom left), with Apps"
-        },
         {
           "asset": "settings-integrations",
           "fallback_file": "assets/settings-integrations.jpg",
@@ -160,18 +166,29 @@
       ]
     },
     {
+      "id": "phone",
+      "title": "Get the mobile app",
+      "body": [
+        "Take your rooms and agents with you: first, put the app on your phone.",
+        "Download the mobile app from your phone&rsquo;s app store and open it. You pair it with this computer in the next step."
+      ],
+      "surface": "mobile",
+      "screenshot": null,
+      "since_release": "2026-10-30"
+    },
+    {
       "id": "mobile",
       "title": "Mobile",
       "body": [
         "The same rooms and agents on your phone.",
-        "Click your name at the bottom left and choose Mobile pairing."
+        "Click your avatar at the bottom left to open your account menu (User, Agent, Apps, Appearance, Mobile pairing, Notifications, Plan &amp; usage), choose Mobile pairing, and scan the code with the mobile app on your phone."
       ],
       "surface": "mobile",
       "screenshot": [
         {
           "asset": "mobile-pairing",
           "fallback_file": "assets/mobile-pairing.jpg",
-          "alt": "Settings: Mobile pairing"
+          "alt": "Settings: Mobile pairing, with the code to scan"
         }
       ],
       "since_release": "2026-10-15"
