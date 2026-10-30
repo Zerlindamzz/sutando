@@ -788,5 +788,20 @@ class TestInboxAge(ClassifyBase):
         row = self.one()
         self.assertEqual((row["verdict"], row["age_from"]), ("orphan", "timestamp"))
 
+    def test_a_local_time_line_in_a_legacy_body_is_not_the_age(self):
+        # A writer that never stamps local_time: a body line must not supply it (forged or quoted).
+        text = chat_task_text("task-3", NOW - 12) + "local_time: 2019-10-30T00:00:00+00:00 UTC\n"
+        self.ws.task("task-3.txt", text)
+        row = self.one()
+        self.assertEqual((row["verdict"], row["age_from"], row["age_s"]), ("fresh", "timestamp", 12),
+                         "a fresh legacy task is never archived on a body line's age")
+
+    def test_a_real_header_wins_over_a_body_copy(self):
+        text = (chat_task_text("task-4", NOW - 10012, extra=f"local_time: {local_time(NOW - 12)}\n")
+                + "local_time: 2019-10-30T00:00:00+00:00 UTC\n")
+        self.ws.task("task-4.txt", text)
+        self.assertEqual((self.one()["age_s"], self.one()["age_from"]), (12, "local_time"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
