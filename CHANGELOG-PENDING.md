@@ -11,6 +11,7 @@ Format: `- Brief description of what changed. ([#NNN])`
 ## Added
 
 <!-- feat() PRs go here -->
+- ag2-sparrow: opt-in AgentActivity task lifecycle. `REMOTE_TASK_LIFECYCLE_V2=1` sends the lease `worker_id` and `execution_generation` on ack and results, beats each task on `/v1/tasks/heartbeat`, stops the core when the broker cancels or reclaims an attempt (withdrawn when a newer generation is acked here first; a newer attempt it stopped anyway is posted as failed); a task the broker closes, or cancels before the ack, leaves the inbox if the core has not taken it up, and the core is stopped if it has, and reconciles with `/v1/tasks/active`. An attempt nobody will answer stops beating and is posted as failed: its task file left the queue unanswered for 10 min (never dropped from flight as completed elsewhere), or the core took the queued file up and then wrote no turn activity or result for 30 min while the core is not mid-turn (2 h when its state is unknown). `REMOTE_TASK_TURN_CONTEXT=1` adds per-attempt turn files and gates each result on the turn's room actions. Both default off. ([#5883])
 
 ## Fixed
 
