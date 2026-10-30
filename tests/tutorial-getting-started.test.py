@@ -149,7 +149,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual([b for b in parse(page).buttons if b],
                          [gs.tour_page.FINALE_PROMPT] + [s.prompt for s in gs.SECTIONS if s.prompt])
         self.assertIn(gs.CONNECT_PROMPT, parse(page).buttons)
-        self.assertIn("Settings &rarr; Integrations", page)
+        self.assertIn("Settings &rarr; Connected apps", page)
         self.assertIn("navigator.clipboard", page)
         self.assertIn("prefers-color-scheme: dark", page)
 
@@ -198,7 +198,7 @@ class RenderTest(unittest.TestCase):
         self.assertIn("start the call and pick your agent under &ldquo;Bring an agent?&rdquo;", by["calls"].how)
         self.assertIn("open the room menu (&#8942;), choose Notifications, and pick Mention &amp; Keywords",
                       by["activity"].how)
-        self.assertIn(("settings-integrations", "settings-integrations.jpg", "Settings \u2192 Apps \u2192 Integrations"),
+        self.assertIn(("settings-integrations", "settings-integrations.jpg", "Settings \u2192 Apps \u2192 Connected apps"),
                       by["apps"].images)
 
     def test_room_audience_says_your_agent(self):
