@@ -473,7 +473,7 @@ def _palette(extra: Tuple[str, ...] = ()) -> tuple:
 
 STYLE = """<style>
 :root { color-scheme: light dark; --bg:#f4f4f4; --fg:#1c1b1c; --muted:#5f5a56; --card:#ffffff; --line:#e2dfdb;
-  --brand:#1c1b1c; --code:#f4f4f4; --hero-ring:#fdeee0; --track:#e6e3df;
+  --brand:#c2520f; --code:#f4f4f4; --hero-ring:#fdeee0; --track:#e6e3df;
   --ink:#1c1b1c; --orange-in:#f9a75c; --orange-out:#f26a21; --yellow-in:#f0e24a; --yellow-out:#ea931f;
   --pink-in:#f8cbfb; --pink-out:#f38c64; --pill-bg:var(--ink); --pill-fg:#ffffff;
   --shadow:0 1px 2px rgba(28,27,28,.04), 0 12px 32px rgba(28,27,28,.06); --orb-alpha:.5;
@@ -520,7 +520,7 @@ p { margin:0 0 6px; }
 .dot[aria-current="step"] { border:2px solid var(--fg); color:var(--fg); }
 .dot.is-done, .dot.is-done:hover:not(:disabled) { background:radial-gradient(closest-side, var(--orange-in) 70%%, var(--orange-out) 130%%); border-color:transparent; color:var(--ink); }
 .card[hidden] { display:none; }
-.card { background:var(--card); border:1px solid transparent; border-radius:26px; padding:24px; margin:0 0 14px; display:flex; gap:20px; box-shadow:var(--shadow); }
+.card { background:var(--card); border:1px solid transparent; border-top:4px solid var(--accent); border-radius:26px; padding:24px; margin:0 0 14px; display:flex; gap:20px; box-shadow:var(--shadow); }
 .icon { flex:none; width:72px; height:72px; border-radius:20px; color:var(--accent); position:relative; display:grid; place-items:center; }
 .icon::before { content:""; position:absolute; inset:0; border-radius:inherit; background:currentColor; opacity:.1; }
 .icon svg { width:50px; height:50px; position:relative; }
@@ -534,7 +534,7 @@ p { margin:0 0 6px; }
 .paste { font-size:13px; color:var(--muted); margin:6px 0 0; }
 .shots { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; align-items:flex-start; }
 .shots img { max-width:100%%; height:auto; border-radius:16px; box-shadow:0 0 0 1px rgba(28,27,28,.08), 0 6px 18px rgba(28,27,28,.06); }
-.finale { position:relative; isolation:isolate; overflow:hidden; }
+.finale { position:relative; isolation:isolate; overflow:hidden; border-top-color:var(--brand); }
 .finale::before { content:""; position:absolute; z-index:-1; width:200px; height:280px; right:-60px; top:-120px; transform:rotate(38deg);
   border-radius:50%%; opacity:var(--orb-alpha); background:radial-gradient(closest-side, var(--yellow-in) 52%%, var(--yellow-out) 100%%); }
 .finale h2 { font-size:clamp(24px, 4vw, 32px); letter-spacing:-.03em; }
