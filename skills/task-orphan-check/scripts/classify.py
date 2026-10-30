@@ -67,8 +67,11 @@ case-insensitive). A path or a bare skill-name mention ("… touches
 skills/import-claude-context/SKILL.md") is NOT one — review 4177: the bare
 substring parked unrelated owner tasks forever.
 
-Age comes from the immutable `timestamp:` header, then the epoch-ms in the
-id, and only then the file mtime (mtime resets on rsync / checkout / sync).
+Age is how long the task has waited in THIS inbox: the `local_time:` header its
+writer stamps when it writes the file, then the immutable `timestamp:` header,
+then the epoch-ms in the id, and only then the file mtime (mtime resets on
+rsync / checkout / sync). `timestamp:` is when the sender sent it, so a message
+that waited at a broker while the app was down is not old on arrival.
 
 Usage:
   python3 skills/task-orphan-check/scripts/classify.py [--workspace DIR] [--now EPOCH]
@@ -154,7 +157,11 @@ def parse_iso(value: str) -> float | None:
 
 
 def task_queued_at(headers: dict, task_id: str, path: Path) -> tuple[float, str]:
-    """(epoch, how) — header timestamp, else id epoch-ms, else mtime."""
+    """(epoch, how) — local_time, else header timestamp, else id epoch-ms, else mtime."""
+    # `local_time:` is "<ISO with offset> <IANA zone>"; the zone name is display only.
+    written = parse_iso((headers.get("local_time", "").split() or [""])[0])
+    if written is not None:
+        return written, "local_time"
     ts = parse_iso(headers.get("timestamp", ""))
     if ts is not None:
         return ts, "timestamp"
