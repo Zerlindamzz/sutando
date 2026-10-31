@@ -755,7 +755,7 @@ def _stand_aside(marker: Path, rooms: Dict[str, dict], room: str, journal: dict,
     else:
         _record(marker, rooms, room, {"kind": journal["kind"], "state": "complete", "hash": now, "foreign": True,
                                       "revision": (read_marker(journal.get("target", "")) or (None, None))[1],
-                                      **note})
+                                      **({"media": journal["media"]} if journal.get("media") else {}), **note})
 
 
 def _undo(commons: Commons, kind: str, step: tuple) -> str:
@@ -955,7 +955,7 @@ def publish(commons: Commons, marker: Path, name: str, owner: Optional[str] = No
                     ours = upgrade = live == strip_digest(page) or (page_shape_ok(live) and len(candidates(pages)) == 1)
                 _record(marker, rooms, commons.room,
                         {"kind": found, "state": "complete", "hash": content_hash(live), "revision": tag[1] if tag else None,
-                         **({} if ours else {"foreign": True})})
+                         **({} if ours else {"foreign": True}), **({"media": record} if record else {})})
                 step, adopted = {"action": "update", "kind": found, "pending": False}, True
             else:
                 step = {"action": "create", "kind": None, "pending": False}
@@ -978,7 +978,7 @@ def publish(commons: Commons, marker: Path, name: str, owner: Optional[str] = No
                     journal = _journal(entry, live, page, None, name, core, audience, agent, env=commons.env)
                 else:
                     _record(marker, rooms, commons.room, {"kind": kind, "state": "complete", "hash": content_hash(live),
-                                                          "foreign": True})
+                                                          "foreign": True, **({"media": record} if record else {})})
                     return {"ok": True, "action": "kept", "edited": True, "kind": kind, "summoned": False,
                             "revision": features.revision, "media": sorted(media), "upload": uploads}
             _record(marker, rooms, commons.room, {**journal, "kind": kind, "state": "pending", "operation_id": op})

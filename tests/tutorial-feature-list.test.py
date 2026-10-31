@@ -1757,6 +1757,26 @@ class UploadTest(_Cli):
                                          "room-list-top": {"mxc": MXC_OF["room-list-top"], "sha256": "0" * 64}}),
                          {"room-list-top": MXC_OF["room-list-top"]})
 
+    def test_a_kept_page_keeps_the_media_record(self):
+        fake = self.with_media(FakeMedia())
+        real = gs.Commons.create_page
+
+        def answered_with_theirs(commons, title, body, operation_id):
+            kind = real(commons, title, body, operation_id)
+            db = json.loads((self.tmp / "room.json").read_text())
+            db["pages"][kind] = "<p>OWNER NOTES</p>"  # the op id answered a page someone else wrote
+            (self.tmp / "room.json").write_text(json.dumps(db))
+            return kind
+        with mock.patch.object(gs.Commons, "create_page", answered_with_theirs):
+            code, out, _ = self.publish()
+        got = json.loads(out)
+        self.assertEqual((code, got["action"], got["edited"]), (0, "kept", True))
+        entry, uploaded = self.entry(), len(fake.uploads)
+        self.assertEqual((entry["foreign"], sorted(entry["media"])), (True, sorted(self.HD)))
+        code, out, _ = self.publish()  # still theirs, and nothing goes up a second time
+        self.assertEqual((code, json.loads(out)["action"], len(fake.uploads)), (0, "kept", uploaded))
+        self.assertEqual(sorted(self.entry()["media"]), sorted(self.HD))
+
     def test_no_upload_and_explicit_media(self):
         fake = self.with_media(FakeMedia())
         code, out, _ = self.publish("--no-upload")
