@@ -200,7 +200,7 @@ class RenderTest(unittest.TestCase):
         self.assertIn("open the room menu (&#8942;), choose Notifications, and pick Mention &amp; Keywords",
                       by["activity"].how)
         self.assertIn(("settings-integrations", "settings-integrations.jpg", "Settings \u2192 Apps \u2192 Connected apps",
-                       "settings-integrations.png"), by["apps"].images)
+                       "settings-integrations.png", None), by["apps"].images)
 
     def test_room_audience_says_your_agent(self):
         room = gs.render_page("Blue", "claude", "room")
@@ -328,6 +328,10 @@ class InteractiveTest(unittest.TestCase):
         for core in gs.CORES:
             page = gs.render_page("Blue", core)
             bare = re.sub(r'src="data:image/(?:jpeg|png);base64,[A-Za-z0-9+/=]+"', 'src=""', page)
+            # The phone step's App Store anchor is the one outbound URL: a link, never a resource.
+            store = re.findall(r'<a href="([^"]*)"', bare)
+            self.assertEqual(store, ["https://apps.apple.com/us/app/s-space/id6788541784"])
+            bare = bare.replace(f'href="{store[0]}"', 'href=""')
             self.assertNotRegex(bare, r"(?i)\b(?:https?:)?//[a-z0-9]")
             self.assertNotRegex(bare, r"(?i)<(?:link|iframe|object|embed)\b|url\(")
             self.assertEqual(re.findall(r'\bsrc="([^"]*)"', bare), [""] * bare.count("<img "))

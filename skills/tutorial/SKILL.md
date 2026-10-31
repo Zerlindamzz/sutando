@@ -210,16 +210,19 @@ so one validated format can serve both:
 - `id`: a slug; it is the step's prompt slot (`--prompts`) and its CSS/JS anchor. A step whose id
   has no icon in `tour_page.py` renders with the default one; accents follow the step's position.
 - `body`: exactly two parts, what the feature is and what to try, as trusted markup with `{name}`
-  for your escaped name. A part may be `{"text": ...}`; a link (`href`) is refused, the page
-  carries no external URL.
+  for your escaped name. A part may be `{"text": ...}`; a link (`href`) in a part is refused.
+- `link` (optional): `{"href", "text"}`, one plain anchor under the step's text. `href` must be an
+  app's App Store or Google Play page (`STORE_LINK`); the phone step links the mobile app with it.
 - `surface`: `dm`, `room` or `mobile`; where the step is tried. With `paste` it must be `dm` or
   `room`, and it decides the "Paste in:" hint.
-- `screenshot`: `null` or a list of asset references `{"asset", "hd_file", "fallback_file", "alt"}`.
+- `screenshot`: `null` or a list of asset references `{"asset", "hd_file", "fallback_file", "alt",
+  "caption"}`; `caption` (optional, at most 32 characters) is a label under the image, like an app's
+  name under its icon.
   `asset` is the name of the capture in the room's media (today the file's stem); `hd_file`
   (optional) is the full-resolution `.png` under `assets/` that `publish` uploads as that media;
   `fallback_file` is the small `.jpg` crop (or `.png`, for an image that needs transparency) under
   `assets/` inlined when the room has no such media; `alt` is required. A shot with no `hd_file`
-  (the app icon) is always inlined. The backend's
+  (the app icon, the QR code) is always inlined. The backend's
   single asset name is a list here because a step carries up to three crops.
 - `since_release`: the release date (`YYYY-MM-DD`) that introduced the feature.
 - `runtime` (optional): `claude` or `codex`; the step appears on that core only.
@@ -278,7 +281,9 @@ drops names the list does not use and anything that is not a well-formed `mxc://
 source. `--no-upload` skips step 2: an asset the room has no recorded media for is inlined.
 
 `assets/app-icon.png` is the desktop app's own icon (from its `icon.icns`, 256 px, shown at
-96 px); it has no `hd_file` and is always inlined. The other `assets/*.png` are the `hd_file`
+96 px, captioned "S" in black); `assets/app-store-qr.png` is a QR code of the App Store link
+(369 px, under 1 KB, shown at 132 px) for a desktop reader to scan with a phone. Neither has an
+`hd_file`; both are always inlined. The other `assets/*.png` are the `hd_file`
 captures, full-window 2x screenshots of the desktop app (0.8.2) taken on a test account, so no real
 person's name, room or account shows; `assets/*.jpg` are their small fallback crops. Three caps: a
 list has at most 24 steps (`STEPS_MAX`, refused by `parse_list`), a rendered page is at most 300 KB
@@ -286,7 +291,7 @@ list has at most 24 steps (`STEPS_MAX`, refused by `parse_list`), a rendered pag
 fallback file inline it once each), and the tests hold each fallback file to 60 KB (500 KB in all)
 and each `hd_file` to a PNG under the 25 MiB `room.media.upload` takes, so publishing a page
 publicly stays well under the 413 that an image-heavy page met (#5318). With every capture
-uploaded the page is text plus the inlined app icon (about 55 KB; under 40 KB when every asset,
+uploaded the page is text plus the inlined app icon and QR code (about 55 KB; under 40 KB when every asset,
 the icon too, is mapped). Room media does not load on a public copy of a page (`page-publish`), so
 a copy meant for the public is rendered without `--media` and published with `--no-upload`.
 
@@ -304,7 +309,8 @@ Each list entry names its own assets (crop, result image, optional animation) as
 page's, while every fallback file stays under the caps above.
 
 **How the page behaves.**
-- It is one self-contained HTML document with no external URL.
+- It is one self-contained HTML document that loads nothing external; its one outbound URL is the
+  phone step's App Store anchor.
 - An inline SVG icon per step, in ink on a brand gradient tile, and a top border in that
   gradient's outer shade; steps cycle orange, yellow, pastel pink. The hero carries a solid
   brand-orange oval behind the title.

@@ -2,15 +2,16 @@
 
 The steps come from a feature list, `feature-list.json` beside this skill's scripts (or one passed
 in): `{schema_version, revision, steps[{id, title, body[what, how], surface, screenshot, since_release,
-paste?, runtime?, watches?}], reviewed_at?}`, the owner-step shape AG2 Space's backend serves. `parse_list` validates it and
+paste?, runtime?, watches?, link?}], reviewed_at?}`, the owner-step shape AG2 Space's backend serves. `parse_list` validates it and
 `render_page(name, core, ..., features, media)` renders it; the page records the list's `revision` in
 its ownership meta tag, so a later run can tell whether its list is newer. Each screenshot is an
-asset reference `{asset, hd_file?, fallback_file, alt}`: `hd_file` is the full-resolution capture
+asset reference `{asset, hd_file?, fallback_file, alt, caption?}`: `hd_file` is the full-resolution capture
 publish uploads to the room's media (room.media.upload); when `media` maps the asset name to that
 `mxc://` URI the image points there, else the small fallback file under assets/ is inlined as a
 data: URI. Pure: rendering depends on nothing but its
-arguments. No external URL appears anywhere in the page (the HTML surface's sandbox may block
-them), so every graphic is inline SVG and every image room media or a data: URI. Progress is kept
+arguments. No external resource is loaded (the HTML surface's sandbox may block them), so every
+graphic is inline SVG and every image room media or a data: URI; the one outbound URL is a step's
+optional app-store `link`, a plain anchor to an allowlisted store page. Progress is kept
 in the page runtime's `window.artifact.state` under a per-viewer key; when the runtime names no
 viewer it uses this browser's localStorage, then memory, and every storage access is guarded.
 """
@@ -37,6 +38,11 @@ LIST_PATH = Path(__file__).resolve().parent.parent / "feature-list.json"  # lint
 REVISION = re.compile(r"^tutorial\.(\d{4}-\d{2}-\d{2})\.(\d+)$")
 STEP_ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 ASSET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# A step's only outbound link: an app's page in the App Store or Google Play, nothing else.
+STORE_LINK = re.compile(r"^https://(?:apps\.apple\.com/[a-z]{2}/app/[a-z0-9-]{1,64}/id\d{6,12}"
+                        r"|play\.google\.com/store/apps/details\?id=[A-Za-z0-9_.]{3,128})$")
+CAPTION_MAX = 32
+LINK_TEXT_MAX = 48
 FALLBACK_FILE = re.compile(r"^assets/([a-z0-9][a-z0-9-]*\.(?:jpg|png))$")
 HD_FILE = re.compile(r"^assets/([a-z0-9][a-z0-9-]*\.png)$")
 HD_MAX_BYTES = 25 * 1024 * 1024  # what room.media.upload takes
@@ -64,6 +70,7 @@ class Shot(NamedTuple):
     file: str
     alt: str
     hd: Optional[str] = None
+    caption: Optional[str] = None
 
 
 class Section(NamedTuple):
@@ -79,6 +86,7 @@ class Section(NamedTuple):
     runtime: Optional[str] = None
     since_release: str = ""
     watches: Tuple[str, ...] = ()
+    link: Optional[Tuple[str, str]] = None
 
 
 class FeatureList(NamedTuple):
@@ -247,7 +255,13 @@ def _step(raw: object, n: int, assets: Path) -> Section:
             raise ValueError(f"{at}: hd_file must be assets/<name>.png, got {hd!r}")
         if h and not (assets / h.group(1)).is_file():
             raise ValueError(f"{at}: {hd} is not under {assets}")
-        images.append(Shot(asset, m.group(1), alt, h.group(1) if h else None))
+        caption = shot.get("caption")
+        if caption is not None and (not isinstance(caption, str) or not caption.strip()
+                                    or len(caption) > CAPTION_MAX):
+            raise ValueError(f"{at}: caption must be 1-{CAPTION_MAX} characters, got {caption!r}")
+        if caption is not None:
+            _no_tags(caption, f"{at} caption")
+        images.append(Shot(asset, m.group(1), alt, h.group(1) if h else None, caption))
     since = raw.get("since_release")
     if not isinstance(since, str) or not RELEASE.match(since):
         raise ValueError(f"{where}: since_release must be YYYY-MM-DD, got {since!r}")
@@ -258,7 +272,17 @@ def _step(raw: object, n: int, assets: Path) -> Section:
     if not isinstance(watches, list) or len(watches) > WATCHES_MAX or not all(
             isinstance(w, str) and WATCH.match(w) for w in watches):
         raise ValueError(f"{where}: watches must list at most {WATCHES_MAX} repo-relative paths, got {watches!r}")
-    return Section(sid, title, what, how, paste, surface, tuple(images), runtime, since, tuple(watches))
+    link = raw.get("link")
+    if link is not None:
+        href, text = (link.get("href"), link.get("text")) if isinstance(link, dict) else (None, None)
+        if set(link if isinstance(link, dict) else ()) != {"href", "text"} or not isinstance(href, str) \
+                or not STORE_LINK.match(href):
+            raise ValueError(f"{where}: link must be {{href, text}} with an App Store or Google Play "
+                             f"app page as href, got {link!r}")
+        if not isinstance(text, str) or not text.strip() or len(text) > LINK_TEXT_MAX:
+            raise ValueError(f"{where}: link text must be 1-{LINK_TEXT_MAX} characters, got {text!r}")
+        link = (href, _no_tags(text, f"{where} link text"))
+    return Section(sid, title, what, how, paste, surface, tuple(images), runtime, since, tuple(watches), link)
 
 
 def parse_list(data: object, assets: Optional[Path] = None) -> FeatureList:
@@ -407,9 +431,21 @@ def _prompt(key: str, prompt: str, where: Optional[str]) -> str:
 def _shots(images: Tuple[Shot, ...], media: Dict[str, str]) -> str:
     if not images:
         return ""
-    figs = "".join(f'<img src="{media.get(shot.asset) or _data_uri(shot.file)}" '
-                   f'alt="{html.escape(shot.alt, quote=True)}" loading="lazy">' for shot in images)
-    return f'<div class="shots">{figs}</div>'
+    figs = []
+    for shot in images:
+        img = (f'<img src="{media.get(shot.asset) or _data_uri(shot.file)}" '
+               f'alt="{html.escape(shot.alt, quote=True)}" loading="lazy">')
+        figs.append(f'<figure class="shot-{shot.asset}">{img}<figcaption>{shot.caption}</figcaption></figure>'
+                    if shot.caption else img)
+    return f'<div class="shots">{"".join(figs)}</div>'
+
+
+def _link(link: Optional[Tuple[str, str]]) -> str:
+    if not link:
+        return ""
+    href, text = link
+    return (f'<p class="store"><a href="{html.escape(href, quote=True)}" target="_blank" '
+            f'rel="noopener noreferrer">{text}</a></p>')
 
 
 def clean_prompts(raw: object, slots: Optional[Tuple[str, ...]] = None) -> Dict[str, str]:
@@ -459,7 +495,7 @@ def _section(sec: Section, index: int, who: str, prompts: Dict[str, str], media:
         f'aria-labelledby="h-{sec.id}" style="--accent-in:var(--{tone}-in);--accent-out:var(--{tone}-out)">'
         f'<div class="icon" aria-hidden="true"><svg viewBox="0 0 64 64" focusable="false">{icon}</svg></div>'
         f'<div class="body"><h2 id="h-{sec.id}">{sec.title.format(name=who)}</h2>'
-        f'<p>{sec.what.format(name=who)}</p><p class="how">{sec.how.format(name=who)}</p>{prompt}'
+        f'<p>{sec.what.format(name=who)}</p><p class="how">{sec.how.format(name=who)}</p>{_link(sec.link)}{prompt}'
         f'{_shots(sec.images, media)}'
         f'<label class="done"><input type="checkbox" data-done="{sec.id}" disabled> Mark done</label>'
         '</div></section>'
@@ -478,7 +514,7 @@ def _finale(who: str, prompts: Dict[str, str]) -> str:
 
 DARK = ("--bg:#151618; --fg:#ececec; --muted:#a9adb3; --card:#202225; --line:#34373b; --brand:#f9a75c; "
         "--code:#2b2d31; --hero-ring:#2d2520; --track:#34373b; --pill-bg:#ececec; --pill-fg:#1c1b1c; "
-        "--shadow:0 0 0 1px #34373b; --orb-alpha:.28;")
+        "--shadow:0 0 0 1px #34373b; --orb-alpha:.28; --label:#ececec;")
 
 
 STYLE = """<style>
@@ -486,7 +522,7 @@ STYLE = """<style>
   --brand:#c2520f; --code:#f4f4f4; --hero-ring:#fdeee0; --track:#e6e3df;
   --ink:#1c1b1c; --orange-in:#f9a75c; --orange-out:#f26a21; --yellow-in:#f0e24a; --yellow-out:#ea931f;
   --pink-in:#f8cbfb; --pink-out:#f38c64; --pill-bg:var(--ink); --pill-fg:#ffffff;
-  --shadow:0 1px 2px rgba(28,27,28,.04), 0 12px 32px rgba(28,27,28,.06); --orb-alpha:.5;
+  --shadow:0 1px 2px rgba(28,27,28,.04), 0 12px 32px rgba(28,27,28,.06); --orb-alpha:.5; --label:#000000;
   --sans:"Haas Recast", "Haas Recast Dense", "Haas Recast Open", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
   --display:"Avantt", "Avantt SemiBold", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
 @media (prefers-color-scheme: dark) {
@@ -545,6 +581,11 @@ p { margin:0 0 6px; }
 .shots { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; align-items:flex-start; }
 .shots img { max-width:100%%; height:auto; border-radius:16px; box-shadow:0 0 0 1px rgba(28,27,28,.08), 0 6px 18px rgba(28,27,28,.06); }
 #s-phone .shots img { width:96px; border-radius:22px; }
+.shots figure { margin:0; display:flex; flex-direction:column; align-items:center; gap:6px; }
+.shots figcaption { color:var(--label); font-size:13px; font-weight:500; line-height:1.2; text-align:center; }
+#s-phone .shot-app-store-qr img { width:132px; border-radius:10px; }
+.store { margin:8px 0 0; }
+.store a { color:var(--brand); font-weight:500; text-underline-offset:3px; }
 .finale { position:relative; isolation:isolate; overflow:hidden; border-top-color:var(--brand); }
 .finale::before { content:""; position:absolute; z-index:-1; width:200px; height:280px; right:-60px; top:-120px; transform:rotate(38deg);
   border-radius:50%%; opacity:var(--orb-alpha); background:radial-gradient(closest-side, var(--yellow-in) 52%%, var(--yellow-out) 100%%); }

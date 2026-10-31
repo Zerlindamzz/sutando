@@ -35,6 +35,7 @@ gs, tp = base.gs, base.gs.tour_page
 Section = tp.Section
 
 # --- fixture: the bundled list's sections as Section literals, rendered without the list -------
+APP_STORE = "https://apps.apple.com/us/app/s-space/id6788541784"
 OLD_SECTIONS = [
     Section("dm", "Your DM",
             "Your DM with {name} is where you ask for things for yourself. What you ask for yourself (research, mail, calendar) comes back in your DM, never in a room.",
@@ -43,7 +44,7 @@ OLD_SECTIONS = [
     Section("rooms", "Rooms",
             "Humans and agents talk in the same chat.",
             "Press + at the top of the room list and choose Room. Name it and pick {name} under AI stands you own, or later open the room menu (&#8942;), choose Invite, and add {name}.",
-            images=(("room-list-add.jpg", "The + menu at the top of the room list"), ("new-room-dialog.jpg", "The New Chat Room dialog, with your agent under AI stands you own"), ("room-menu-invite.jpg", "The room menu, with Invite"))),
+            images=(("new-room-dialog.jpg", "The New Chat Room dialog, with your agent under AI stands you own"), ("room-menu-invite.jpg", "The room menu, with Invite"))),
     Section("commons", "Commons",
             "Each room's shared Docs, HTML pages, PDFs, whiteboards, sheets and databases. Open them with the Commons button at the right of the room header.",
             "Ask {name} in a room:",
@@ -52,7 +53,8 @@ OLD_SECTIONS = [
     Section("agents", "Connect other agents",
             "Bring agents from the apps you already use into your rooms.",
             "Press + at the top of the room list and choose Agent. In Add an agent, pick Use an agent from another app and Continue. Under Which agent?, pick the app you already use: Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok), Muse (by Meta), or Other for Claude, Cursor and more. Then connect it inside that app and sign in.",
-            images=(("add-agent-dialog.jpg", "Add an agent, with Use an agent from another app"), ("which-agent.jpg", "Which agent? Dot, Grok Bot, Muse or Other"))),
+            images=(("room-list-add.jpg", "The + menu at the top of the room list, with Agent"),
+                    ("add-agent-dialog.jpg", "Add an agent, with Use an agent from another app"), ("which-agent.jpg", "Which agent? Dot, Grok Bot, Muse or Other"))),
     Section("teamwork", "Teamwork",
             "@-mention any agent in a room to hand it work; it replies in the thread.",
             "In a room with another agent, type @ in the message box, pick {name} from the Mentions list, and ask:",
@@ -73,8 +75,10 @@ OLD_SECTIONS = [
             images=(("room-list-top.jpg", "The bell at the top of the room list"),)),
     Section("phone", "Get the mobile app",
             "Take your rooms and agents with you: first, put the app on your phone.",
-            "Search &ldquo;S&rdquo; in your phone&rsquo;s app store, install the app with this icon and open it. You pair it with this computer in the next step.",
-            images=(("app-icon.png", "The S app icon"),)),
+            "On your phone, search &ldquo;AG2 Space&rdquo; in the App Store (by AG2AI, Inc), or scan this code with your phone&rsquo;s camera. Install the app with this icon and open it. You pair it with this computer in the next step.",
+            images=(("app-icon.png", "The S app icon", "S"),
+                    ("app-store-qr.png", "QR code that opens the app in the App Store", "Scan with your phone")),
+            link=(APP_STORE, "Open in the App Store")),
     Section("mobile", "Mobile",
             "The same rooms and agents on your phone.",
             "Click your avatar at the bottom left to open your account menu (User, Agent, Apps, Appearance, Mobile pairing, Notifications, Plan &amp; usage), choose Mobile pairing, press Enable, and scan the code with the mobile app on your phone.",
@@ -83,11 +87,11 @@ OLD_SECTIONS = [
 
 
 def as_shots(sec):
-    """The old (file, alt) pairs as asset references: the asset name is the file's stem, the file
-    its fallback, and a .jpg capture's full-resolution upload the same stem's .png. This adapter is
-    the only difference between the fixture and the list."""
-    return sec._replace(images=tuple(tp.Shot(f[:-4], f, alt, f"{f[:-4]}.png" if f.endswith(".jpg") else None)
-                                     for f, alt in sec.images))
+    """The old (file, alt[, caption]) tuples as asset references: the asset name is the file's stem,
+    the file its fallback, and a .jpg capture's full-resolution upload the same stem's .png. This
+    adapter is the only difference between the fixture and the list."""
+    return sec._replace(images=tuple(tp.Shot(f[:-4], f, alt, f"{f[:-4]}.png" if f.endswith(".jpg") else None, *cap)
+                                     for f, alt, *cap in sec.images))
 
 
 # The Claude Code history import step was removed from the list; no core gets an extra section.
@@ -101,6 +105,7 @@ RENDERED_AT = {
     "tutorial.2026-10-30.1": "feaeabb8abeb90bb7a4a2281ffbe192c34790451801894534722b2418895e640",
     "tutorial.2026-10-30.2": "d9bdd6471f4f04ada5480794703267b9efdbd9b5e9f79530c6512a489bc0c253",
     "tutorial.2026-10-30.3": "07d495fd4a218c09e081cd67fd5c631724c5f41d50cd74ce37afee73cefdfdfd",
+    "tutorial.2026-10-30.4": "55431cb1c85d31762782b40551f258d560876f1817ffe87ce338a2b251846f02",
 }
 STEP_IDS = ["dm", "rooms", "commons", "agents", "teamwork", "calls", "apps", "activity", "phone", "mobile"]
 ASSET_CAP = 60_000
@@ -199,11 +204,11 @@ class LosslessTest(unittest.TestCase):
         self.assertEqual(set(raw["steps"][0]), {"id", "title", "body", "surface", "screenshot",
                                                  "since_release", "paste"})
         shots = [shot for s in raw["steps"] if s["screenshot"] for shot in s["screenshot"]]
-        self.assertEqual(len(shots), 13)
+        self.assertEqual(len(shots), 14)
         for shot in shots:
-            if shot["asset"] == "app-icon":  # small enough to inline everywhere: never uploaded
-                self.assertEqual(set(shot), {"asset", "fallback_file", "alt"})
-                self.assertEqual(shot["fallback_file"], "assets/app-icon.png")
+            if shot["asset"] in ("app-icon", "app-store-qr"):  # small enough to inline everywhere: never uploaded
+                self.assertEqual(set(shot), {"asset", "fallback_file", "alt", "caption"})
+                self.assertEqual(shot["fallback_file"], f"assets/{shot['asset']}.png")
                 continue
             self.assertEqual(set(shot), {"asset", "hd_file", "fallback_file", "alt"})
             self.assertEqual((shot["hd_file"], shot["fallback_file"]),
@@ -212,12 +217,12 @@ class LosslessTest(unittest.TestCase):
 
     def test_sections_match_field_for_field(self):
         for old, new in zip(OLD_LIST.steps, tp.FEATURES.steps):
-            self.assertEqual((old.id, old.title, old.what, old.how, old.prompt, old.images),
-                             (new.id, new.title, new.what, new.how, new.prompt, new.images))
+            self.assertEqual((old.id, old.title, old.what, old.how, old.prompt, old.images, old.link),
+                             (new.id, new.title, new.what, new.how, new.prompt, new.images, new.link))
             if old.prompt:
                 self.assertEqual(old.where, new.where)  # the paste hint's surface
         for sec in OLD_SECTIONS:
-            self.assertEqual([(f, alt) for f, alt in sec.images], [(s.file, s.alt) for s in as_shots(sec).images])
+            self.assertEqual([(f, alt) for f, alt, *_ in sec.images], [(s.file, s.alt) for s in as_shots(sec).images])
 
 
 class ListTest(unittest.TestCase):
@@ -231,6 +236,26 @@ class ListTest(unittest.TestCase):
         served = good_list(kind="tutorial", vendor=None, etag="x")
         self.assertEqual(tp.parse_list(served), tp.FEATURES)
         self.assertEqual(tp.load_list(), tp.FEATURES)
+
+    def test_a_step_link_is_only_an_app_store_page(self):
+        app = "https://apps.apple.com/us/app/s-space/id6788541784"
+        play = "https://play.google.com/store/apps/details?id=ai.ag2.space"
+        for href in (app, play):
+            got = tp.parse_list(with_step(link={"href": href, "text": "Get it"})).steps[0].link
+            self.assertEqual(got, (href, "Get it"))
+        for href in ("https://x.test/app", "http://apps.apple.com/us/app/s-space/id6788541784",
+                     "https://apps.apple.com.evil.test/us/app/x/id123456",
+                     app + "?x=1", "javascript:alert(1)", "https://play.google.com/store/apps/details?id=a\"b"):
+            self.refuse(with_step(link={"href": href, "text": "Get it"}), "link")
+        self.refuse(with_step(link={"href": app}), "link")
+        self.refuse(with_step(link={"href": app, "text": "a", "extra": 1}), "link")
+        self.refuse(with_step(link={"href": app, "text": ""}), "link text")
+        self.refuse(with_step(link={"href": app, "text": "<i>x</i>"}), "link text")
+        self.refuse(with_step(link=app), "link")
+        page = tp.render_page("Blue", "claude")
+        self.assertEqual(page.count('<a href='), 1)
+        self.assertIn(f'<a href="{app}" target="_blank" rel="noopener noreferrer">Open in the App Store</a>', page)
+        self.assertIn('<figcaption>S</figcaption>', page)
 
     def test_each_malformed_shape_is_refused_by_name(self):
         self.refuse([], "JSON object")
@@ -267,6 +292,11 @@ class ListTest(unittest.TestCase):
         self.refuse(with_step(screenshot=[{**shot, "asset": "Room List"}]), "asset must be")
         self.refuse(with_step(screenshot=[{**shot, "asset": "room-list-add"}]), "duplicate asset", "room-list-add")
         self.refuse(with_step(screenshot=["room-list-add.jpg"]), "object with asset")
+        self.refuse(with_step(screenshot=[{**shot, "caption": ""}]), "caption")
+        self.refuse(with_step(screenshot=[{**shot, "caption": "x" * (tp.CAPTION_MAX + 1)}]), "caption")
+        self.refuse(with_step(screenshot=[{**shot, "caption": "<b>S</b>"}]), "caption", "'<'")
+        ok = tp.parse_list(with_step(screenshot=[{**shot, "caption": "S"}]))
+        self.assertEqual(ok.steps[0].images[0].caption, "S")
         self.refuse(with_step(screenshot="room-list-add.jpg"), "object with asset")
         self.refuse(with_step(since_release="Oct 2026"), "since_release")
         self.refuse(with_step(runtime="gemini"), "runtime")
@@ -408,21 +438,21 @@ class MediaTest(unittest.TestCase):
                                                                          "commons-surfaces"})
         self.assertEqual(tp.clean_media(["x"]), {})
         self.assertEqual(tp.clean_media(None), {})
-        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 13)
+        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 14)
 
     def test_a_mapped_asset_points_at_the_rooms_media_and_the_rest_stay_inlined(self):
         page = tp.render_page("Blue", "codex", media={"room-list-add": MXC_OF["room-list-add"]})
-        self.assertIn(f'<img src="{MXC_OF["room-list-add"]}" alt="The + menu at the top of the room list" '
+        self.assertIn(f'<img src="{MXC_OF["room-list-add"]}" alt="The + menu at the top of the room list, with Agent" '
                       'loading="lazy">', page)
         self.assertEqual(page.count('<img src="data:image/jpeg;base64,'), 11)
-        self.assertEqual(page.count('<img src="data:image/png;base64,'), 1)
+        self.assertEqual(page.count('<img src="data:image/png;base64,'), 2)
         self.assertEqual(page.count('<img src="mxc://'), 1)
 
     def test_a_fully_mapped_page_shrinks_to_text(self):
         for core in tp.CORES:
             page = tp.render_page("Blue", core, "dm", "@kai.agent:example.test", media=MXC_OF)
             self.assertNotIn("data:image", page)
-            self.assertEqual(page.count('<img src="mxc://'), 13)
+            self.assertEqual(page.count('<img src="mxc://'), 14)
             self.assertLess(len(page.encode("utf-8")), 40_000, core)
 
     def test_without_media_the_page_is_the_fallback_page(self):
@@ -1643,12 +1673,12 @@ class UploadTest(_Cli):
         page = self.page_text()
         # The text page (under 40 KB, as test_a_fully_mapped_page_shrinks_to_text pins) plus the
         # inlined app icon, about 18 KB of base64.
-        icon = len(base64.b64encode((tp.ASSETS / "app-icon.png").read_bytes()))
+        icon = sum(len(base64.b64encode((tp.ASSETS / f).read_bytes())) for f in ("app-icon.png", "app-store-qr.png"))
         self.assertLess(len(page.encode("utf-8")) - icon, 40_000)
         self.assertLess(len(page.encode("utf-8")), 60_000)
         self.assertEqual(page.count('<img src="mxc://'), 12)
         self.assertNotIn("data:image/jpeg", page)
-        self.assertEqual(page.count('<img src="data:image/png;base64,'), 1)  # the app icon stays inline
+        self.assertEqual(page.count('<img src="data:image/png;base64,'), 2)  # the app icon and QR stay inline
         self.assertEqual(fake.checks, 1)
         for room, asset, mime, op, digest in fake.uploads:
             self.assertEqual((room, mime), (self.ROOM, "image/png"))

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "tutorial.2026-10-30.3",
+  "revision": "tutorial.2026-10-30.4",
   "steps": [
     {
       "id": "dm",
@@ -23,12 +23,6 @@
       ],
       "surface": "room",
       "screenshot": [
-        {
-          "asset": "room-list-add",
-          "hd_file": "assets/room-list-add.png",
-          "fallback_file": "assets/room-list-add.jpg",
-          "alt": "The + menu at the top of the room list"
-        },
         {
           "asset": "new-room-dialog",
           "hd_file": "assets/new-room-dialog.png",
@@ -78,6 +72,12 @@
       ],
       "surface": "room",
       "screenshot": [
+        {
+          "asset": "room-list-add",
+          "hd_file": "assets/room-list-add.png",
+          "fallback_file": "assets/room-list-add.jpg",
+          "alt": "The + menu at the top of the room list, with Agent"
+        },
         {
           "asset": "add-agent-dialog",
           "hd_file": "assets/add-agent-dialog.png",
@@ -181,17 +181,28 @@
       "title": "Get the mobile app",
       "body": [
         "Take your rooms and agents with you: first, put the app on your phone.",
-        "Search &ldquo;S&rdquo; in your phone&rsquo;s app store, install the app with this icon and open it. You pair it with this computer in the next step."
+        "On your phone, search &ldquo;AG2 Space&rdquo; in the App Store (by AG2AI, Inc), or scan this code with your phone&rsquo;s camera. Install the app with this icon and open it. You pair it with this computer in the next step."
       ],
       "surface": "mobile",
       "screenshot": [
         {
           "asset": "app-icon",
           "fallback_file": "assets/app-icon.png",
-          "alt": "The S app icon"
+          "alt": "The S app icon",
+          "caption": "S"
+        },
+        {
+          "asset": "app-store-qr",
+          "fallback_file": "assets/app-store-qr.png",
+          "alt": "QR code that opens the app in the App Store",
+          "caption": "Scan with your phone"
         }
       ],
-      "since_release": "2026-10-30"
+      "since_release": "2026-10-30",
+      "link": {
+        "href": "https://apps.apple.com/us/app/s-space/id6788541784",
+        "text": "Open in the App Store"
+      }
     },
     {
       "id": "mobile",
