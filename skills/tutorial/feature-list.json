@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "tutorial.2026-10-30.4",
+  "revision": "tutorial.2026-10-30.5",
   "steps": [
     {
       "id": "dm",
@@ -23,6 +23,12 @@
       ],
       "surface": "room",
       "screenshot": [
+        {
+          "asset": "room-list-add-room",
+          "hd_file": "assets/room-list-add-room.png",
+          "fallback_file": "assets/room-list-add-room.jpg",
+          "alt": "Press + in the room list, then Room"
+        },
         {
           "asset": "new-room-dialog",
           "hd_file": "assets/new-room-dialog.png",

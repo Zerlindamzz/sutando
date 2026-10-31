@@ -44,7 +44,7 @@ OLD_SECTIONS = [
     Section("rooms", "Rooms",
             "Humans and agents talk in the same chat.",
             "Press + at the top of the room list and choose Room. Name it and pick {name} under AI stands you own, or later open the room menu (&#8942;), choose Invite, and add {name}.",
-            images=(("new-room-dialog.jpg", "The New Chat Room dialog, with your agent under AI stands you own"), ("room-menu-invite.jpg", "The room menu, with Invite"))),
+            images=(("room-list-add-room.jpg", "Press + in the room list, then Room"), ("new-room-dialog.jpg", "The New Chat Room dialog, with your agent under AI stands you own"), ("room-menu-invite.jpg", "The room menu, with Invite"))),
     Section("commons", "Commons",
             "Each room's shared Docs, HTML pages, PDFs, whiteboards, sheets and databases. Open them with the Commons button at the right of the room header.",
             "Ask {name} in a room:",
@@ -106,6 +106,7 @@ RENDERED_AT = {
     "tutorial.2026-10-30.2": "d9bdd6471f4f04ada5480794703267b9efdbd9b5e9f79530c6512a489bc0c253",
     "tutorial.2026-10-30.3": "07d495fd4a218c09e081cd67fd5c631724c5f41d50cd74ce37afee73cefdfdfd",
     "tutorial.2026-10-30.4": "55431cb1c85d31762782b40551f258d560876f1817ffe87ce338a2b251846f02",
+    "tutorial.2026-10-30.5": "cc82abc3094ed9f03a298c412f19b5cdf38f1253da042ee978dcea7ce0a6d122",
 }
 STEP_IDS = ["dm", "rooms", "commons", "agents", "teamwork", "calls", "apps", "activity", "phone", "mobile"]
 ASSET_CAP = 60_000
@@ -204,7 +205,7 @@ class LosslessTest(unittest.TestCase):
         self.assertEqual(set(raw["steps"][0]), {"id", "title", "body", "surface", "screenshot",
                                                  "since_release", "paste"})
         shots = [shot for s in raw["steps"] if s["screenshot"] for shot in s["screenshot"]]
-        self.assertEqual(len(shots), 14)
+        self.assertEqual(len(shots), 15)
         for shot in shots:
             if shot["asset"] in ("app-icon", "app-store-qr"):  # small enough to inline everywhere: never uploaded
                 self.assertEqual(set(shot), {"asset", "fallback_file", "alt", "caption"})
@@ -213,7 +214,7 @@ class LosslessTest(unittest.TestCase):
             self.assertEqual(set(shot), {"asset", "hd_file", "fallback_file", "alt"})
             self.assertEqual((shot["hd_file"], shot["fallback_file"]),
                              (f"assets/{shot['asset']}.png", f"assets/{shot['asset']}.jpg"))  # the stems
-        self.assertEqual(len(tp.hd_files(tp.FEATURES)), 12)
+        self.assertEqual(len(tp.hd_files(tp.FEATURES)), 13)
 
     def test_sections_match_field_for_field(self):
         for old, new in zip(OLD_LIST.steps, tp.FEATURES.steps):
@@ -438,13 +439,13 @@ class MediaTest(unittest.TestCase):
                                                                          "commons-surfaces"})
         self.assertEqual(tp.clean_media(["x"]), {})
         self.assertEqual(tp.clean_media(None), {})
-        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 14)
+        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 15)
 
     def test_a_mapped_asset_points_at_the_rooms_media_and_the_rest_stay_inlined(self):
         page = tp.render_page("Blue", "codex", media={"room-list-add": MXC_OF["room-list-add"]})
         self.assertIn(f'<img src="{MXC_OF["room-list-add"]}" alt="The + menu at the top of the room list, with Agent" '
                       'loading="lazy">', page)
-        self.assertEqual(page.count('<img src="data:image/jpeg;base64,'), 11)
+        self.assertEqual(page.count('<img src="data:image/jpeg;base64,'), 12)
         self.assertEqual(page.count('<img src="data:image/png;base64,'), 2)
         self.assertEqual(page.count('<img src="mxc://'), 1)
 
@@ -452,7 +453,7 @@ class MediaTest(unittest.TestCase):
         for core in tp.CORES:
             page = tp.render_page("Blue", core, "dm", "@kai.agent:example.test", media=MXC_OF)
             self.assertNotIn("data:image", page)
-            self.assertEqual(page.count('<img src="mxc://'), 14)
+            self.assertEqual(page.count('<img src="mxc://'), 15)
             self.assertLess(len(page.encode("utf-8")), 40_000, core)
 
     def test_without_media_the_page_is_the_fallback_page(self):
@@ -504,7 +505,7 @@ class SizeTest(unittest.TestCase):
 
     def test_every_hd_file_is_a_png_room_media_takes(self):
         hd = tp.hd_files(tp.FEATURES)
-        self.assertEqual(len(hd), 12)
+        self.assertEqual(len(hd), 13)
         for asset, name in hd.items():
             data = (tp.ASSETS / name).read_bytes()
             self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"), name)
@@ -735,7 +736,7 @@ class ListOverrideTest(_Cli):
         got = json.loads(out)
         self.assertEqual((code, got["action"], got["media"]), (0, "created", ["room-list-add"]))
         self.assertIn(f'<img src="{MXC_OF["room-list-add"]}"', self.page_text())
-        self.assertEqual(self.page_text().count("data:image/jpeg"), 11)
+        self.assertEqual(self.page_text().count("data:image/jpeg"), 12)
         entry = gs.load_marker(gs.marker_path(self.tmp / "ws"))[self.ROOM]
         self.assertEqual(entry["media"], {"room-list-add": MXC_OF["room-list-add"]})
         code, out, _ = self.publish()  # the room keeps its media map
@@ -965,7 +966,7 @@ class IfNewerTest(_Cli):
         newer = self.write_list("tutorial.2026-11-01.1")
         target = tp.render_page("Blue", "codex", "dm", self.ME, {"dm": "Draft my update."}, "Founder",
                                 tp.load_list(newer))
-        self.assertEqual(len(gs.chunks(target)), 2)  # the default-size page: one replace, one append
+        self.assertEqual(len(gs.chunks(target)), 3)  # the default-size page: one replace, two appends
         for at in self.BOUNDARIES:
             with self.subTest(at=at):
                 mine, journaled, left = self.fail_at(at, newer, prompts)
@@ -1409,7 +1410,7 @@ class IfNewerTest(_Cli):
         opener.assert_not_called()
 
     SMALL = (131_071, 2_000_000)  # a call budget that holds no 214 KB text
-    SPLIT = (250_000, 400_000)  # the page fits an argument, but not beside the whole new page
+    SPLIT = (275_000, 400_000)  # the page fits an argument, but not beside the whole new page
 
     def test_a_default_size_page_refreshes_under_linuxs_exec_limit(self):
         code, out, _ = self.publish()
@@ -1676,7 +1677,7 @@ class UploadTest(_Cli):
         icon = sum(len(base64.b64encode((tp.ASSETS / f).read_bytes())) for f in ("app-icon.png", "app-store-qr.png"))
         self.assertLess(len(page.encode("utf-8")) - icon, 40_000)
         self.assertLess(len(page.encode("utf-8")), 60_000)
-        self.assertEqual(page.count('<img src="mxc://'), 12)
+        self.assertEqual(page.count('<img src="mxc://'), 13)
         self.assertNotIn("data:image/jpeg", page)
         self.assertEqual(page.count('<img src="data:image/png;base64,'), 2)  # the app icon and QR stay inline
         self.assertEqual(fake.checks, 1)
@@ -1685,7 +1686,7 @@ class UploadTest(_Cli):
             self.assertEqual(digest, hashlib.sha256((tp.ASSETS / self.HD[asset]).read_bytes()).hexdigest())
             self.assertEqual(op, gs.media_op_id(self.ROOM, asset, digest))
             self.assertEqual(self.entry()["media"][asset], {"mxc": "mxc://ag2.example/" + op[-24:], "sha256": digest})
-        self.assertEqual(len({op for _, _, _, op, _ in fake.uploads}), 12)
+        self.assertEqual(len({op for _, _, _, op, _ in fake.uploads}), 13)
         self.assertNotEqual(gs.media_op_id("!other:example.test", "room-list-add", "0" * 64),
                             gs.media_op_id(self.ROOM, "room-list-add", "0" * 64))
 
@@ -1734,9 +1735,9 @@ class UploadTest(_Cli):
         self.assertEqual((code, got["action"]), (0, "created"))
         self.assertEqual(got["upload"]["fallback"], ["commons-surfaces"])
         self.assertIn("commons-surfaces: room.media.upload failed", got["upload"]["reason"])
-        self.assertEqual(len(got["upload"]["uploaded"]), 11)
+        self.assertEqual(len(got["upload"]["uploaded"]), 12)
         page = self.page_text()
-        self.assertEqual(page.count('<img src="mxc://'), 11)
+        self.assertEqual(page.count('<img src="mxc://'), 12)
         self.assertEqual(page.count('<img src="data:image/jpeg;base64,'), 1)
         self.assertIn('<img src="data:image/jpeg;base64,' + base64.b64encode(
             (tp.ASSETS / "commons-surfaces.jpg").read_bytes()).decode("ascii"), page)
@@ -1769,11 +1770,11 @@ class UploadTest(_Cli):
         got = json.loads(out)
         self.assertEqual((code, got["action"]), (0, "updated"))
         self.assertNotIn("room-list-add", [u[1] for u in fake.uploads])
-        self.assertEqual(len(fake.uploads), 11)
+        self.assertEqual(len(fake.uploads), 12)
         self.assertIn(f'<img src="{MXC_OF["room-list-add"]}"', self.page_text())
         self.assertEqual(self.entry()["media"]["room-list-add"], MXC_OF["room-list-add"])
         code, out, _ = self.publish()
-        self.assertEqual((json.loads(out)["action"], len(fake.uploads)), ("unchanged", 11))
+        self.assertEqual((json.loads(out)["action"], len(fake.uploads)), ("unchanged", 12))
 
     def test_room_media_loads_beside_room_commons_on_its_actions_client(self):
         (self.tmp / "room_media.py").write_text(

@@ -1330,7 +1330,7 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(gs.read_marker(parts[0]), (self.ME, gs.tour_page.FEATURES.revision))
         self.assertTrue(gs.page_digest_ok(self.page()))  # the tag's digest covers the whole page
         self.assertEqual([c[0] for c in room["calls"]],
-                         ["pages", "create", "read", "read", "append", "read", "summon"])
+                         ["pages", "create", "read", "read"] + ["append", "read"] * (len(parts) - 1) + ["summon"])
         appended = [c for c in room["calls"] if c[0] == "append"]
         self.assertTrue(all(c[2] <= gs.CHUNK_BYTES for c in appended))
         self.assertEqual(room["calls"][-1], ["summon", "html-p1", "@chi:ag2.space"])
