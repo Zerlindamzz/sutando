@@ -63,12 +63,14 @@ The procedure lives in the `tutorial` skill: [`skills/tutorial/SKILL.md`](../ski
   Room Commons call, and refuses to run without one: the page's ownership tag is how a later run
   finds it. A revision-only bump of the list rewrites the page once (its tag records the revision)
   and the next `--if-newer` is a no-op.
-- **Screenshots.** Each screenshot is a Room Commons asset reference: the page points at the
-  room's media (`mxc://`, from `--media` or the room's recorded map) when the room has the asset,
-  and inlines the bundled fallback file otherwise, so a room with no uploads gets the same page as
-  before. Every page variant stays under 300 KB.
+- **Screenshots.** Each screenshot is a Room Commons asset reference: `publish` uploads its
+  full-resolution `hd_file` to the room's media (`room.media.upload`, an operation id per room and
+  file hash, never in an encrypted room), records `{asset: {mxc, sha256}}` and re-uploads only a
+  changed file; the page points at that `mxc://` (or one from `--media`) and inlines the bundled
+  fallback file for any asset that did not go up. Every page variant stays under 300 KB.
 
 Last verified: 2026-10-24, against `tests/tutorial-feature-list.test.py` and
 `tests/tutorial-getting-started.test.py` at the head that introduced the feature list. The live
 Room Commons round trip of `publish --if-newer` was witnessed at the previous head; the
-HTML-surface rendering of `mxc://` media was not.
+HTML-surface rendering of `mxc://` media was not, and the screenshot upload is covered by stubbed
+tests only.

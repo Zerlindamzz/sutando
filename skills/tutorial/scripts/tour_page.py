@@ -5,9 +5,10 @@ in): `{schema_version, revision, steps[{id, title, body[what, how], surface, scr
 paste?, runtime?, watches?}], reviewed_at?}`, the owner-step shape AG2 Space's backend serves. `parse_list` validates it and
 `render_page(name, core, ..., features, media)` renders it; the page records the list's `revision` in
 its ownership meta tag, so a later run can tell whether its list is newer. Each screenshot is an
-asset reference `{asset, fallback_file, alt}`: when `media` maps the asset name to the room's
-`mxc://` URI (room media, uploaded with room.media.upload) the image points there, else the
-fallback file under assets/ is inlined as a data: URI. Pure: rendering depends on nothing but its
+asset reference `{asset, hd_file?, fallback_file, alt}`: `hd_file` is the full-resolution capture
+publish uploads to the room's media (room.media.upload); when `media` maps the asset name to that
+`mxc://` URI the image points there, else the small fallback file under assets/ is inlined as a
+data: URI. Pure: rendering depends on nothing but its
 arguments. No external URL appears anywhere in the page (the HTML surface's sandbox may block
 them), so every graphic is inline SVG and every image room media or a data: URI. Progress is kept
 in the page runtime's `window.artifact.state` under a per-viewer key; when the runtime names no
@@ -37,6 +38,8 @@ REVISION = re.compile(r"^tutorial\.(\d{4}-\d{2}-\d{2})\.(\d+)$")
 STEP_ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 ASSET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 FALLBACK_FILE = re.compile(r"^assets/([a-z0-9][a-z0-9-]*\.(?:jpg|png))$")
+HD_FILE = re.compile(r"^assets/([a-z0-9][a-z0-9-]*\.png)$")
+HD_MAX_BYTES = 25 * 1024 * 1024  # what room.media.upload takes
 MIME = {".jpg": "image/jpeg", ".png": "image/png"}
 # Room media as room-commons' room_pdf.py accepts it from room.media.upload.
 MXC = re.compile(r"^mxc://[A-Za-z0-9][A-Za-z0-9.-]{0,253}(?::\d{1,5})?/[A-Za-z0-9_-]{1,255}$")
@@ -55,10 +58,12 @@ PAGE_MAX_BYTES = 300_000
 
 class Shot(NamedTuple):
     """One screenshot: the room-media asset name, the assets/ file inlined when the room has no
-    such media, and the alt text."""
+    such media, the alt text, and the full-resolution PNG uploaded as that media (None: never
+    uploaded, always inlined)."""
     asset: str
     file: str
     alt: str
+    hd: Optional[str] = None
 
 
 class Section(NamedTuple):
@@ -225,7 +230,7 @@ def _step(raw: object, n: int, assets: Path) -> Section:
     for i, shot in enumerate(shots if isinstance(shots, list) else [] if shots is None else [shots]):
         at = f"{where} screenshot[{i}]"
         if not isinstance(shot, dict):
-            raise ValueError(f"{at}: must be an object with asset, fallback_file and alt")
+            raise ValueError(f"{at}: must be an object with asset, fallback_file and alt (hd_file optional)")
         asset, fallback, alt = shot.get("asset"), shot.get("fallback_file"), shot.get("alt")
         if not isinstance(asset, str) or not ASSET_NAME.match(asset):
             raise ValueError(f"{at}: asset must be a bare lowercase name, got {asset!r}")
@@ -236,7 +241,13 @@ def _step(raw: object, n: int, assets: Path) -> Section:
             raise ValueError(f"{at}: alt text is required")
         if not (assets / m.group(1)).is_file():
             raise ValueError(f"{at}: {fallback} is not under {assets}")
-        images.append(Shot(asset, m.group(1), alt))
+        hd = shot.get("hd_file")
+        h = HD_FILE.match(hd) if isinstance(hd, str) else None
+        if hd is not None and not h:
+            raise ValueError(f"{at}: hd_file must be assets/<name>.png, got {hd!r}")
+        if h and not (assets / h.group(1)).is_file():
+            raise ValueError(f"{at}: {hd} is not under {assets}")
+        images.append(Shot(asset, m.group(1), alt, h.group(1) if h else None))
     since = raw.get("since_release")
     if not isinstance(since, str) or not RELEASE.match(since):
         raise ValueError(f"{where}: since_release must be YYYY-MM-DD, got {since!r}")
@@ -331,13 +342,26 @@ def asset_names(features: FeatureList) -> Tuple[str, ...]:
     return tuple(shot.asset for s in features.steps for shot in s.images)
 
 
+def hd_files(features: FeatureList) -> Dict[str, str]:
+    """{asset name: its full-resolution file under assets/} for the screenshots that have one."""
+    return {shot.asset: shot.hd for s in features.steps for shot in s.images if shot.hd}
+
+
+def media_uri(value: object) -> Optional[str]:
+    """The mxc URI of one media-map value: a bare URI (--media) or an upload record {mxc, sha256};
+    None when it is neither or the URI is malformed."""
+    uri = value.get("mxc") if isinstance(value, dict) else value
+    return uri if isinstance(uri, str) and MXC.match(uri) else None
+
+
 def clean_media(raw: object, features: Optional[FeatureList] = None) -> Dict[str, str]:
     """{asset name: mxc URI} from `raw`: only names the list refers to, only well-formed `mxc://`
-    URIs. Anything else is dropped, so that asset keeps its inlined fallback."""
+    URIs (bare, or an upload record's `mxc`). Anything else is dropped, so that asset keeps its
+    inlined fallback."""
     if not isinstance(raw, dict):
         return {}
     names = asset_names(features or FEATURES)
-    return {k: v for k, v in raw.items() if k in names and isinstance(v, str) and MXC.match(v)}
+    return {k: media_uri(v) for k, v in raw.items() if k in names and media_uri(v)}
 
 
 def prompt_slots(features: FeatureList) -> Tuple[str, ...]:
@@ -520,6 +544,7 @@ p { margin:0 0 6px; }
 .paste { font-size:13px; color:var(--muted); margin:6px 0 0; }
 .shots { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; align-items:flex-start; }
 .shots img { max-width:100%%; height:auto; border-radius:16px; box-shadow:0 0 0 1px rgba(28,27,28,.08), 0 6px 18px rgba(28,27,28,.06); }
+#s-phone .shots img { width:96px; border-radius:22px; }
 .finale { position:relative; isolation:isolate; overflow:hidden; border-top-color:var(--brand); }
 .finale::before { content:""; position:absolute; z-index:-1; width:200px; height:280px; right:-60px; top:-120px; transform:rotate(38deg);
   border-radius:50%%; opacity:var(--orb-alpha); background:radial-gradient(closest-side, var(--yellow-in) 52%%, var(--yellow-out) 100%%); }

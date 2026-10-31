@@ -89,6 +89,9 @@ STUB = textwrap.dedent('''
 TOUR = ["Your DM", "Rooms", "Commons", "Connect other agents", "Teamwork", "Calls & voice",
         "Connect your apps", "Activity & notices", "Get the mobile app", "Mobile"]
 FINALE = "You\u2019re set. Ask Blue anything"
+# The stub room-commons has no room_media.py: every full-resolution capture stays inlined.
+NO_MEDIA_SUPPORT = {"uploaded": [], "skipped": [], "fallback": list(gs.tour_page.hd_files(gs.tour_page.FEATURES)),
+                    "reason": "this room-commons has no room media support (room_media.py)"}
 
 
 class Page(HTMLParser):
@@ -148,7 +151,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual([b for b in parse(page).buttons if b],
                          [gs.tour_page.FINALE_PROMPT] + [s.prompt for s in gs.SECTIONS if s.prompt])
         self.assertIn(gs.CONNECT_PROMPT, parse(page).buttons)
-        self.assertIn("Settings &rarr; Connected apps", page)
+        self.assertIn("Settings &rarr; Apps &rarr; Connected apps", page)
         self.assertIn("navigator.clipboard", page)
         self.assertIn("prefers-color-scheme: dark", page)
 
@@ -182,7 +185,7 @@ class RenderTest(unittest.TestCase):
 
     def test_reviewed_wording(self):
         by = {s.id: s for s in gs.sections_for("claude")}
-        self.assertIn("Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok) or Muse (by Meta)", by["agents"].how)
+        self.assertIn("Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok), Muse (by Meta), or Other", by["agents"].how)
         self.assertIn("Mention &amp; Keywords", by["activity"].how)
         self.assertIn("Activity tab", by["activity"].how)
         self.assertNotIn("import", by)
@@ -196,8 +199,8 @@ class RenderTest(unittest.TestCase):
         self.assertIn("start the call and pick your agent under &ldquo;Bring an agent?&rdquo;", by["calls"].how)
         self.assertIn("open the room menu (&#8942;), choose Notifications, and pick Mention &amp; Keywords",
                       by["activity"].how)
-        self.assertIn(("settings-integrations", "settings-integrations.jpg", "Settings \u2192 Apps \u2192 Connected apps"),
-                      by["apps"].images)
+        self.assertIn(("settings-integrations", "settings-integrations.jpg", "Settings \u2192 Apps \u2192 Connected apps",
+                       "settings-integrations.png"), by["apps"].images)
 
     def test_room_audience_says_your_agent(self):
         room = gs.render_page("Blue", "claude", "room")
@@ -219,7 +222,7 @@ class RenderTest(unittest.TestCase):
     def test_codex_and_claude_code_are_not_offered_as_addable_agents(self):
         agents = [s for s in gs.SECTIONS if s.title == "Connect other agents"][0]
         self.assertNotIn("Codex", agents.what + agents.how)
-        self.assertNotIn("Claude", agents.what + agents.how)
+        self.assertNotIn("Claude Code", agents.what + agents.how)  # Claude the app is one "Other" pick
 
     def test_render_is_deterministic_and_depends_only_on_name_and_core(self):
         self.assertEqual(gs.render_page("Kai"), gs.render_page("  Kai "))
@@ -713,8 +716,10 @@ class AssetTest(unittest.TestCase):
     def test_every_step_image_exists_and_is_small(self):
         tp = gs.tour_page
         used = {shot.file for s in tp.sections_for("claude") for shot in s.images}
-        files = {p.name: p.stat().st_size for p in tp.ASSETS.iterdir() if p.suffix in (".jpg", ".png")}
-        self.assertEqual(used, set(files))
+        files = {name: (tp.ASSETS / name).stat().st_size for name in used}  # the inlined fallbacks
+        hd = {shot.hd for s in tp.sections_for("claude") for shot in s.images if shot.hd}
+        on_disk = {p.name for p in tp.ASSETS.iterdir() if p.suffix in (".jpg", ".png")}
+        self.assertEqual(used | hd, on_disk)
         self.assertTrue(all(size <= 60_000 for size in files.values()), files)
         self.assertLessEqual(sum(files.values()), 500_000)
         for s in tp.sections_for("claude"):
@@ -858,9 +863,11 @@ class MainTest(unittest.TestCase):
                                  "--owner", "@owner:example.test", "--room-commons", str(self.stub),
                                  "--agent-mxid", "@kai.agent:example.test")
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {"ok": True, "action": "created", "kind": "html-p1",
-                                           "summoned": True, "name": "Blue", "list": "file",
-                                           "revision": gs.tour_page.FEATURES.revision, "media": []})
+        got = json.loads(out)
+        self.assertEqual(got.pop("upload"), NO_MEDIA_SUPPORT)
+        self.assertEqual(got, {"ok": True, "action": "created", "kind": "html-p1",
+                               "summoned": True, "name": "Blue", "list": "file",
+                               "revision": gs.tour_page.FEATURES.revision, "media": []})
         with mock.patch.object(gs, "detect_core", return_value="codex"):
             code, out, _ = self.main("publish", "--room", self.ROOM, "--name", "Blue",
                                      "--room-commons", str(self.stub), "--agent-mxid", "@kai.agent:example.test")
@@ -1308,6 +1315,7 @@ class PublishTest(unittest.TestCase):
 
     def test_first_run_creates_writes_and_summons(self):
         out = self.publish(owner="@chi:ag2.space")
+        self.assertEqual(out.pop("upload"), NO_MEDIA_SUPPORT)
         self.assertEqual(out, {"ok": True, "action": "created", "kind": "html-p1", "summoned": True,
                                "revision": gs.tour_page.FEATURES.revision, "media": []})
         room = self.room()

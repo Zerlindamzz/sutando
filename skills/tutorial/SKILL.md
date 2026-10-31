@@ -74,6 +74,12 @@ not retry the page in the same turn.
    publishing in its own `room`. A missing or malformed file, or a field of the wrong shape, is
    ignored; with no `--room` and no usable saved room, the script exits 2.
 
+   Before rendering, `publish` uploads the screenshots' full-resolution captures to the room's
+   media (see "Screenshots are Commons asset references" below) and reports it in the result's
+   `upload`: `uploaded`, `skipped` (already in the room at the same hash, or mapped by `--media`),
+   `fallback` (inlined instead) and `reason`. An encrypted room gets the inlined page; that is
+   expected, not an error. `--no-upload` uploads nothing.
+
    You need not source any env file. `room_commons.py` is found beside this skill, else in the
    installed skills directory. When the environment names none of its credentials, they are read
    from the s.space channel env file through the shared resolver
@@ -208,10 +214,12 @@ so one validated format can serve both:
   carries no external URL.
 - `surface`: `dm`, `room` or `mobile`; where the step is tried. With `paste` it must be `dm` or
   `room`, and it decides the "Paste in:" hint.
-- `screenshot`: `null` or a list of asset references `{"asset", "fallback_file", "alt"}`. `asset`
-  is the name of the capture in the room's media (today the file's stem); `fallback_file` is the
-  `.jpg` crop (or `.png`, for an image that needs transparency) under `assets/` inlined when the
-  room has no such media; `alt` is required. The backend's
+- `screenshot`: `null` or a list of asset references `{"asset", "hd_file", "fallback_file", "alt"}`.
+  `asset` is the name of the capture in the room's media (today the file's stem); `hd_file`
+  (optional) is the full-resolution `.png` under `assets/` that `publish` uploads as that media;
+  `fallback_file` is the small `.jpg` crop (or `.png`, for an image that needs transparency) under
+  `assets/` inlined when the room has no such media; `alt` is required. A shot with no `hd_file`
+  (the app icon) is always inlined. The backend's
   single asset name is a list here because a step carries up to three crops.
 - `since_release`: the release date (`YYYY-MM-DD`) that introduced the feature.
 - `runtime` (optional): `claude` or `codex`; the step appears on that core only.
@@ -245,29 +253,45 @@ Nothing is fetched unless `--list` names a URL.
 
 **Screenshots are Commons asset references.** Images travel as room media, not as the page's own
 bytes (decided for #5836): each `screenshot` entry names its asset, and the page points an
-`<img src>` at the room's media for it, `mxc://<server>/<id>`, the form room-commons' `room_pdf.py`
-accepts from the `room.media.upload` Action (`data_b64`, `mime`, `filename`, `post: false`;
-answered with `mxc`; refused in an encrypted room). Which assets a room has is the room's media
-map, `{asset name: "mxc://..."}`, passed as `--media <json>` to `render` or `publish`, recorded in
-the room's entry and reused on every later run there (a later `--media` adds to it); `clean_media`
-drops names the list does not use and anything that is not a well-formed `mxc://` URI. An asset
-with no mapping is inlined from its `fallback_file` as a `data:` URI, so a room with no uploads
-gets today's page byte for byte. `assets/app-icon.png` is the desktop app's own icon (from its
-`icon.icns`, 256 px). `assets/*.jpg` are real UI crops, adapted from Zerlinda's
-Sutando's "Getting started with s.space" page, each cropped so that no person's name, room or
-account shows. Three caps: a list has at most 24 steps (`STEPS_MAX`, refused by `parse_list`), a
-rendered page is at most 300 KB (`PAGE_MAX_BYTES`; `render` and `publish` refuse a larger one, and
-asset names that share one fallback file inline it once each), and the tests hold each fallback
-file to 60 KB, so publishing a page publicly stays well under the 413 that an image-heavy page met
-(#5318). Fully mapped, the page shrinks to text (under
-40 KB). Room media does not load on a public copy of a page (`page-publish`), so a copy meant for
-the public is rendered without `--media`.
+`<img src>` at the room's media for it, `mxc://<server>/<id>`. The desktop client's HTML surface
+resolves such an address for the viewer (`RoomHtmlView.tsx` with `htmlAssets.ts`: the page asks the
+host for each `mxc://` its source names, and the host answers with an authenticated media URL), so
+an uploaded image never expires and needs no public link.
 
-**Visuals (follow-up).** Part 2 of #5836 captures the images from the current client at release
-time, uploads each with `room.media.upload` to the room's media and records `{asset: mxc}` in the
-room's entry, so every DM's page points at the same release's captures and shrinks to text. Before
-the first `asset` is set it witnesses that the HTML surface loads an `<img src="mxc://...">` in a
-room (the Doc surface is known to). The visuals comment asks for:
+`publish` does the upload itself, before it renders, in the room it publishes to:
+1. It checks the room is not end-to-end encrypted (room-commons' `room_media.py`
+   `require_plain_room`, from `room.media.list`): an agent's upload there would sit in plaintext. An
+   encrypted room, or one whose encryption cannot be read, gets no upload at all.
+2. Each `hd_file` goes up with the `room.media.upload` Action (`data_b64`, `mime` `image/png`,
+   `filename`, `post: false`; answered with `mxc`), with the operation id `tutorial-media-<sha256 of
+   room, asset and the file's sha256>`, so a retry, or a run cut short and run again, replays the
+   first upload instead of storing the bytes twice.
+3. The room's entry records `{asset: {"mxc", "sha256"}}`. A later run uploads again only a file
+   whose sha256 changed (a new release's capture); an unchanged one is `skipped`.
+4. Whatever cannot go up (encrypted room, a room-commons without `room_media.py`, a failed call, an
+   answer that is not a well-formed `mxc://`) falls back for that asset alone: the page inlines its
+   `fallback_file` as a `data:` URI. The result's `upload` names each such asset and the reason.
+
+`--media <json>` (`{asset name: "mxc://..."}`) maps assets by hand to `render` or `publish`; on
+`publish` it wins over an upload and is recorded and reused there like an upload. `clean_media`
+drops names the list does not use and anything that is not a well-formed `mxc://` URI, from either
+source. `--no-upload` skips step 2: an asset the room has no recorded media for is inlined.
+
+`assets/app-icon.png` is the desktop app's own icon (from its `icon.icns`, 256 px, shown at
+96 px); it has no `hd_file` and is always inlined. The other `assets/*.png` are the `hd_file`
+captures, full-window 2x screenshots of the desktop app (0.8.2) taken on a test account, so no real
+person's name, room or account shows; `assets/*.jpg` are their small fallback crops. Three caps: a
+list has at most 24 steps (`STEPS_MAX`, refused by `parse_list`), a rendered page is at most 300 KB
+(`PAGE_MAX_BYTES`; `render` and `publish` refuse a larger one, and asset names that share one
+fallback file inline it once each), and the tests hold each fallback file to 60 KB (500 KB in all)
+and each `hd_file` to a PNG under the 25 MiB `room.media.upload` takes, so publishing a page
+publicly stays well under the 413 that an image-heavy page met (#5318). With every capture
+uploaded the page is text plus the inlined app icon (about 55 KB; under 40 KB when every asset,
+the icon too, is mapped). Room media does not load on a public copy of a page (`page-publish`), so
+a copy meant for the public is rendered without `--media` and published with `--no-upload`.
+
+**Visuals (follow-up).** Part 2 of #5836 adds captures to the room's media the same way, one
+`hd_file` per asset. The visuals comment asks for:
 1. screenshots for the imageless steps (Your DM, Connect other agents);
 2. one "result" image per step showing the payoff (a plan in Commons, another agent's reply in a
    Teamwork thread, an answer that used the connected Calendar);
@@ -294,7 +318,7 @@ page's, while every fallback file stays under the caps above.
 - Copy outcomes are announced in a live status region. Animations stop under
   `prefers-reduced-motion`. Without scripts, every step shows.
 
-**Size.** With its screenshots the page is about 215 KB (capped at 300 KB), over the 196,608
+**Size.** With every screenshot inlined (no upload) the page is about 235 KB (capped at 300 KB), over the 196,608
 bytes Room Commons takes in one write. The first piece goes in the create's own body; the rest are appended in pieces
 of at most 120,000 bytes (`CHUNK_BYTES`). Arguments reach `room_commons.py` as JSON in a 0600 file,
 never argv, so Linux's 131,072-byte cap on one argument does not apply. A refresh is one `replace` when the old and new

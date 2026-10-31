@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "revision": "tutorial.2026-10-30.2",
+  "revision": "tutorial.2026-10-30.3",
   "steps": [
     {
       "id": "dm",
       "title": "Your DM",
       "body": [
         "Your DM with {name} is where you ask for things for yourself. What you ask for yourself (research, mail, calendar) comes back in your DM, never in a room.",
-        "Ask {name} in your DM:"
+        "Open {name} under Your agents at the top of the sidebar and ask:"
       ],
       "surface": "dm",
       "screenshot": null,
@@ -25,16 +25,19 @@
       "screenshot": [
         {
           "asset": "room-list-add",
+          "hd_file": "assets/room-list-add.png",
           "fallback_file": "assets/room-list-add.jpg",
           "alt": "The + menu at the top of the room list"
         },
         {
           "asset": "new-room-dialog",
+          "hd_file": "assets/new-room-dialog.png",
           "fallback_file": "assets/new-room-dialog.jpg",
           "alt": "The New Chat Room dialog, with your agent under AI stands you own"
         },
         {
           "asset": "room-menu-invite",
+          "hd_file": "assets/room-menu-invite.png",
           "fallback_file": "assets/room-menu-invite.jpg",
           "alt": "The room menu, with Invite"
         }
@@ -52,11 +55,13 @@
       "screenshot": [
         {
           "asset": "room-header-commons",
+          "hd_file": "assets/room-header-commons.png",
           "fallback_file": "assets/room-header-commons.jpg",
           "alt": "The Commons button at the right of the room header"
         },
         {
           "asset": "commons-surfaces",
+          "hd_file": "assets/commons-surfaces.png",
           "fallback_file": "assets/commons-surfaces.jpg",
           "alt": "Commons: Doc, Whiteboard, HTML, PDF, Figma, Sheet and Database"
         }
@@ -69,17 +74,19 @@
       "title": "Connect other agents",
       "body": [
         "Bring agents from the apps you already use into your rooms.",
-        "Press + at the top of the room list, choose Agent, then Use an agent from another app and Continue. Pick the app you already use: Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok) or Muse (by Meta), or Other for any app with connectors. Give the agent a name, then connect it inside that app and sign in."
+        "Press + at the top of the room list and choose Agent. In Add an agent, pick Use an agent from another app and Continue. Under Which agent?, pick the app you already use: Dot (by OpenAI, in ChatGPT), Grok Bot (in Grok), Muse (by Meta), or Other for Claude, Cursor and more. Then connect it inside that app and sign in."
       ],
       "surface": "room",
       "screenshot": [
         {
           "asset": "add-agent-dialog",
+          "hd_file": "assets/add-agent-dialog.png",
           "fallback_file": "assets/add-agent-dialog.jpg",
           "alt": "Add an agent, with Use an agent from another app"
         },
         {
           "asset": "which-agent",
+          "hd_file": "assets/which-agent.png",
           "fallback_file": "assets/which-agent.jpg",
           "alt": "Which agent? Dot, Grok Bot, Muse or Other"
         }
@@ -97,6 +104,7 @@
       "screenshot": [
         {
           "asset": "mention-list",
+          "hd_file": "assets/mention-list.png",
           "fallback_file": "assets/mention-list.jpg",
           "alt": "Typing @ in the message box opens the Mentions list"
         }
@@ -115,6 +123,7 @@
       "screenshot": [
         {
           "asset": "room-header-call",
+          "hd_file": "assets/room-header-call.png",
           "fallback_file": "assets/room-header-call.jpg",
           "alt": "The headphone icon in the room header"
         }
@@ -129,12 +138,13 @@
       "title": "Connect your apps",
       "body": [
         "Gmail, Calendar, Drive, Slack and more, so {name} can work with your real data.",
-        "Click your avatar at the bottom left and choose Apps to open Settings &rarr; Connected apps, or ask {name} and a Connect button appears:"
+        "Click your avatar at the bottom left and choose Apps to open Settings &rarr; Apps &rarr; Connected apps, or ask {name} and a Connect button appears:"
       ],
       "surface": "dm",
       "screenshot": [
         {
           "asset": "settings-integrations",
+          "hd_file": "assets/settings-integrations.png",
           "fallback_file": "assets/settings-integrations.jpg",
           "alt": "Settings → Apps → Connected apps"
         }
@@ -156,6 +166,7 @@
       "screenshot": [
         {
           "asset": "room-list-top",
+          "hd_file": "assets/room-list-top.png",
           "fallback_file": "assets/room-list-top.jpg",
           "alt": "The bell at the top of the room list"
         }
@@ -187,14 +198,15 @@
       "title": "Mobile",
       "body": [
         "The same rooms and agents on your phone.",
-        "Click your avatar at the bottom left to open your account menu (User, Agent, Apps, Appearance, Mobile pairing, Notifications, Plan &amp; usage), choose Mobile pairing, and scan the code with the mobile app on your phone."
+        "Click your avatar at the bottom left to open your account menu (User, Agent, Apps, Appearance, Mobile pairing, Notifications, Plan &amp; usage), choose Mobile pairing, press Enable, and scan the code with the mobile app on your phone."
       ],
       "surface": "mobile",
       "screenshot": [
         {
           "asset": "mobile-pairing",
+          "hd_file": "assets/mobile-pairing.png",
           "fallback_file": "assets/mobile-pairing.jpg",
-          "alt": "Settings: Mobile pairing, with the code to scan"
+          "alt": "Settings: Mobile pairing, with Enable"
         }
       ],
       "since_release": "2026-10-15"
