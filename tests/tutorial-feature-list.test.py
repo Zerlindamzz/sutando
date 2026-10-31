@@ -75,7 +75,7 @@ OLD_SECTIONS = [
             images=(("room-list-top.jpg", "The bell at the top of the room list"),)),
     Section("phone", "Get the mobile app",
             "Take your rooms and agents with you: first, put the app on your phone.",
-            "On your phone, search &ldquo;AG2 Space&rdquo; in the App Store (by AG2AI, Inc), or scan this code with your phone&rsquo;s camera. Install the app with this icon and open it. You pair it with this computer in the next step.",
+            "On your phone, search &ldquo;s.space&rdquo; in the App Store (by AG2AI, Inc), or scan this code with your phone&rsquo;s camera. Install the app with this icon and open it. You pair it with this computer in the next step.",
             images=(("app-icon.png", "The S app icon", "S"),
                     ("app-store-qr.png", "QR code that opens the app in the App Store", "Scan with your phone")),
             link=(APP_STORE, "Open in the App Store")),
@@ -107,6 +107,7 @@ RENDERED_AT = {
     "tutorial.2026-10-30.3": "07d495fd4a218c09e081cd67fd5c631724c5f41d50cd74ce37afee73cefdfdfd",
     "tutorial.2026-10-30.4": "55431cb1c85d31762782b40551f258d560876f1817ffe87ce338a2b251846f02",
     "tutorial.2026-10-30.5": "cc82abc3094ed9f03a298c412f19b5cdf38f1253da042ee978dcea7ce0a6d122",
+    "tutorial.2026-10-30.6": "a699783d9c31d1cd9fbd73efa3738a4f4fbdfabbf9757d7cf5ba4b1067aab5d6",
 }
 STEP_IDS = ["dm", "rooms", "commons", "agents", "teamwork", "calls", "apps", "activity", "phone", "mobile"]
 ASSET_CAP = 60_000

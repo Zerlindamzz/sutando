@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "tutorial.2026-10-30.5",
+  "revision": "tutorial.2026-10-30.6",
   "steps": [
     {
       "id": "dm",
@@ -187,7 +187,7 @@
       "title": "Get the mobile app",
       "body": [
         "Take your rooms and agents with you: first, put the app on your phone.",
-        "On your phone, search &ldquo;AG2 Space&rdquo; in the App Store (by AG2AI, Inc), or scan this code with your phone&rsquo;s camera. Install the app with this icon and open it. You pair it with this computer in the next step."
+        "On your phone, search &ldquo;s.space&rdquo; in the App Store (by AG2AI, Inc), or scan this code with your phone&rsquo;s camera. Install the app with this icon and open it. You pair it with this computer in the next step."
       ],
       "surface": "mobile",
       "screenshot": [
