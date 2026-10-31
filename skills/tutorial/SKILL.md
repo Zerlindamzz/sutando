@@ -49,7 +49,7 @@ not retry the page in the same turn.
    - `user_profile.md` already says what they do.
 
    In that case write your own prompts for this owner into a temporary JSON file, one per slot:
-   `dm`, `commons`, `teamwork`, `apps`, `import`, `finale`. Write 4–6 of them.
+   `dm`, `commons`, `teamwork`, `apps`, `finale`. Write 4–5 of them.
    - Each is first person, practical, one line, at most 200 characters, with no links or markup.
    - Each must run on a fresh install: only the `apps` slot may assume a connected app.
    - The slot decides where the prompt is pasted (your DM or a room), not the wording.
@@ -183,11 +183,12 @@ thing to try, in the list's order:
 6. Calls & voice: the headphone icon in the room header only.
 7. Connect your apps: Settings → Integrations.
 8. Activity & notices.
-9. Mobile.
+9. Get the mobile app.
+10. Mobile: pair the phone from the account menu.
 
-On a Claude Code core it adds "Import your Claude Code history" (the step with `runtime: claude`);
-on Codex or an unknown core that step is left out. Every prompt says where to paste it (your DM or
-a room). When every step is done, a closing card offers one more prompt.
+Every step applies to every core (a step may name a `runtime` to show on one core only; none
+does today). Every prompt says where to paste it (your DM or a room). When every step is done,
+a closing card offers one more prompt.
 
 **The feature list.** `feature-list.json` is the per-release list the tour is generated from, in
 the shape s.space's backend serves for owner setup copy (ag2space-backend#2898's `owner` block),
@@ -201,7 +202,7 @@ so one validated format can serve both:
 ```
 
 - `id`: a slug; it is the step's prompt slot (`--prompts`) and its CSS/JS anchor. A step whose id
-  has no icon or accent in `tour_page.py` renders with the default ones.
+  has no icon in `tour_page.py` renders with the default one; accents follow the step's position.
 - `body`: exactly two parts, what the feature is and what to try, as trusted markup with `{name}`
   for your escaped name. A part may be `{"text": ...}`; a link (`href`) is refused, the page
   carries no external URL.
@@ -209,7 +210,8 @@ so one validated format can serve both:
   `room`, and it decides the "Paste in:" hint.
 - `screenshot`: `null` or a list of asset references `{"asset", "fallback_file", "alt"}`. `asset`
   is the name of the capture in the room's media (today the file's stem); `fallback_file` is the
-  crop under `assets/` inlined when the room has no such media; `alt` is required. The backend's
+  `.jpg` crop (or `.png`, for an image that needs transparency) under `assets/` inlined when the
+  room has no such media; `alt` is required. The backend's
   single asset name is a list here because a step carries up to three crops.
 - `since_release`: the release date (`YYYY-MM-DD`) that introduced the feature.
 - `runtime` (optional): `claude` or `codex`; the step appears on that core only.
@@ -250,7 +252,8 @@ map, `{asset name: "mxc://..."}`, passed as `--media <json>` to `render` or `pub
 the room's entry and reused on every later run there (a later `--media` adds to it); `clean_media`
 drops names the list does not use and anything that is not a well-formed `mxc://` URI. An asset
 with no mapping is inlined from its `fallback_file` as a `data:` URI, so a room with no uploads
-gets today's page byte for byte. `assets/*.jpg` are real UI crops, adapted from Zerlinda's
+gets today's page byte for byte. `assets/app-icon.png` is the desktop app's own icon (from its
+`icon.icns`, 256 px). `assets/*.jpg` are real UI crops, adapted from Zerlinda's
 Sutando's "Getting started with s.space" page, each cropped so that no person's name, room or
 account shows. Three caps: a list has at most 24 steps (`STEPS_MAX`, refused by `parse_list`), a
 rendered page is at most 300 KB (`PAGE_MAX_BYTES`; `render` and `publish` refuse a larger one, and
@@ -265,8 +268,7 @@ time, uploads each with `room.media.upload` to the room's media and records `{as
 room's entry, so every DM's page points at the same release's captures and shrinks to text. Before
 the first `asset` is set it witnesses that the HTML surface loads an `<img src="mxc://...">` in a
 room (the Doc surface is known to). The visuals comment asks for:
-1. screenshots for the three imageless steps (Your DM, Connect other agents, Import your Claude
-   Code history);
+1. screenshots for the imageless steps (Your DM, Connect other agents);
 2. one "result" image per step showing the payoff (a plan in Commons, another agent's reply in a
    Teamwork thread, an answer that used the connected Calendar);
 3. very short animations for the key actions: inviting an agent to a room, @-mentioning an agent,
@@ -279,8 +281,9 @@ page's, while every fallback file stays under the caps above.
 
 **How the page behaves.**
 - It is one self-contained HTML document with no external URL.
-- An inline SVG icon and accent colour per step (AA contrast in both themes), under a hero with
-  your name.
+- An inline SVG icon per step, in ink on a brand gradient tile, and a top border in that
+  gradient's outer shade; steps cycle orange, yellow, pastel pink. The hero carries a solid
+  brand-orange oval behind the title.
 - The tour opens on one step, with the step's title, numbered dots, Back and Next, a "Show all"
   toggle and the arrow keys. In Show all, a dot scrolls to its step.
 - "Mark done" moves to the next step that is not done (in step mode only) and fills the progress

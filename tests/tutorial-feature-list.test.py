@@ -71,19 +71,13 @@ OLD_SECTIONS = [
             images=(("room-list-top.jpg", "The bell at the top of the room list"),)),
     Section("phone", "Get the mobile app",
             "Take your rooms and agents with you: first, put the app on your phone.",
-            "Download the mobile app from your phone&rsquo;s app store and open it. You pair it with this computer in the next step."),
+            "Search &ldquo;S&rdquo; in your phone&rsquo;s app store, install the app with this icon and open it. You pair it with this computer in the next step.",
+            images=(("app-icon.png", "The S app icon"),)),
     Section("mobile", "Mobile",
             "The same rooms and agents on your phone.",
             "Click your avatar at the bottom left to open your account menu (User, Agent, Apps, Appearance, Mobile pairing, Notifications, Plan &amp; usage), choose Mobile pairing, and scan the code with the mobile app on your phone.",
             images=(("mobile-pairing.jpg", "Settings: Mobile pairing, with the code to scan"),)),
 ]
-OLD_IMPORT_SECTION = Section(
-    "import", "Import your Claude Code history",
-    "If you use Claude Code, {name} can read your local Claude Code history and bring what you "
-    "worked on into its memory. You see a digest first; nothing is kept until you say so.",
-    "Ask {name}:",
-    tp.IMPORT_PROMPT, "dm",
-)
 
 
 def as_shots(sec):
@@ -92,9 +86,8 @@ def as_shots(sec):
     return sec._replace(images=tuple(tp.Shot(f[:-4], f, alt) for f, alt in sec.images))
 
 
-# The old module appended the import section on a Claude core; the list says so with `runtime`.
-OLD_LIST = tp.FeatureList(tp.FEATURES.revision,
-                          tuple(as_shots(s) for s in OLD_SECTIONS) + (OLD_IMPORT_SECTION._replace(runtime="claude"),))
+# The Claude Code history import step was removed from the list; no core gets an extra section.
+OLD_LIST = tp.FeatureList(tp.FEATURES.revision, tuple(as_shots(s) for s in OLD_SECTIONS))
 MXC_OF = {name: f"mxc://ag2.example/{i:02d}{name.replace('-', '')}" for i, name in enumerate(tp.asset_names(tp.FEATURES))}
 
 # The rendered content each shipped revision was cut with. A change to a rendered field fails
@@ -102,8 +95,9 @@ MXC_OF = {name: f"mxc://ag2.example/{i:02d}{name.replace('-', '')}" for i, name 
 RENDERED_AT = {
     "tutorial.2026-10-23.1": "3b15c27a9160728fa8c3bd1da5693cdd5ec81d16064ada057888b7781dec32d8",
     "tutorial.2026-10-30.1": "feaeabb8abeb90bb7a4a2281ffbe192c34790451801894534722b2418895e640",
+    "tutorial.2026-10-30.2": "d9bdd6471f4f04ada5480794703267b9efdbd9b5e9f79530c6512a489bc0c253",
 }
-STEP_IDS = ["dm", "rooms", "commons", "agents", "teamwork", "calls", "apps", "activity", "phone", "mobile", "import"]
+STEP_IDS = ["dm", "rooms", "commons", "agents", "teamwork", "calls", "apps", "activity", "phone", "mobile"]
 ASSET_CAP = 60_000
 PAGE_CAP = 300_000
 
@@ -187,24 +181,23 @@ class LosslessTest(unittest.TestCase):
 
     def test_the_bundled_list_carries_todays_steps(self):
         self.assertEqual([s.id for s in tp.FEATURES.steps], STEP_IDS)
-        self.assertEqual([s.id for s in tp.SECTIONS], STEP_IDS[:-1])
-        by = {s.id: s for s in tp.FEATURES.steps}
-        self.assertEqual(by["import"].runtime, "claude")
-        self.assertTrue(all(s.runtime is None for s in tp.FEATURES.steps if s.id != "import"))
+        self.assertEqual([s.id for s in tp.SECTIONS], STEP_IDS)
+        self.assertNotIn("import", [s.id for s in tp.FEATURES.steps])
+        self.assertTrue(all(s.runtime is None for s in tp.FEATURES.steps))
         self.assertEqual({s.since_release for s in tp.FEATURES.steps}, {"2026-10-15", "2026-10-30"})
-        self.assertEqual(tp.PROMPT_SLOTS, ("dm", "commons", "teamwork", "apps", "import", "finale"))
-        self.assertEqual([s.id for s in tp.sections_for("codex")], STEP_IDS[:-1])
-        self.assertEqual([s.id for s in tp.sections_for("claude")], STEP_IDS)
+        self.assertEqual(tp.PROMPT_SLOTS, ("dm", "commons", "teamwork", "apps", "finale"))
+        for core in tp.CORES:
+            self.assertEqual([s.id for s in tp.sections_for(core)], STEP_IDS)
         raw = json.loads(tp.LIST_PATH.read_text(encoding="utf-8"))
         self.assertEqual(raw["schema_version"], tp.SCHEMA_VERSION)
         self.assertEqual(raw["revision"], tp.FEATURES.revision)
         self.assertEqual(set(raw["steps"][0]), {"id", "title", "body", "surface", "screenshot",
                                                  "since_release", "paste"})
         shots = [shot for s in raw["steps"] if s["screenshot"] for shot in s["screenshot"]]
-        self.assertEqual(len(shots), 12)
+        self.assertEqual(len(shots), 13)
         for shot in shots:
             self.assertEqual(set(shot), {"asset", "fallback_file", "alt"})
-            self.assertEqual(shot["fallback_file"], f"assets/{shot['asset']}.jpg")  # today's names: the stems
+            self.assertIn(shot["fallback_file"], (f"assets/{shot['asset']}.jpg", f"assets/{shot['asset']}.png"))  # the stems
 
     def test_sections_match_field_for_field(self):
         for old, new in zip(OLD_LIST.steps, tp.FEATURES.steps):
@@ -350,13 +343,12 @@ class ListTest(unittest.TestCase):
                               features=features)
         self.assertIn('id="s-marketplace"', page)
         self.assertIn(tp.DEFAULT_ICON, page)
-        self.assertIn(f"--a-marketplace:{tp.DEFAULT_ACCENT[0]};", page)
-        self.assertIn(f"--a-marketplace:{tp.DEFAULT_ACCENT[1]};", page)
+        # Accents follow the step's position, so a new step needs no art of its own: second is yellow.
+        self.assertIn('id="s-marketplace" data-id="marketplace" aria-labelledby="h-marketplace" '
+                      'style="--accent-in:var(--yellow-in);--accent-out:var(--yellow-out)"', page)
         self.assertIn("Show me the Marketplace.", page)
         self.assertEqual(base.steps(page)[1], "Marketplace")
-        self.assertGreaterEqual(tp.contrast(tp.DEFAULT_ACCENT[0], tp.CARD[0]), 4.5)
-        self.assertGreaterEqual(tp.contrast(tp.DEFAULT_ACCENT[1], tp.CARD[1]), 4.5)
-        self.assertNotIn("--a-marketplace", tp.render_page("Blue", "codex"))
+        self.assertNotIn('id="s-marketplace"', tp.render_page("Blue", "codex"))
 
     def test_an_unreadable_file_is_a_value_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,20 +391,21 @@ class MediaTest(unittest.TestCase):
                                                                          "commons-surfaces"})
         self.assertEqual(tp.clean_media(["x"]), {})
         self.assertEqual(tp.clean_media(None), {})
-        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 12)
+        self.assertEqual(len(tp.asset_names(tp.FEATURES)), 13)
 
     def test_a_mapped_asset_points_at_the_rooms_media_and_the_rest_stay_inlined(self):
         page = tp.render_page("Blue", "codex", media={"room-list-add": MXC_OF["room-list-add"]})
         self.assertIn(f'<img src="{MXC_OF["room-list-add"]}" alt="The + menu at the top of the room list" '
                       'loading="lazy">', page)
         self.assertEqual(page.count('<img src="data:image/jpeg;base64,'), 11)
+        self.assertEqual(page.count('<img src="data:image/png;base64,'), 1)
         self.assertEqual(page.count('<img src="mxc://'), 1)
 
     def test_a_fully_mapped_page_shrinks_to_text(self):
         for core in tp.CORES:
             page = tp.render_page("Blue", core, "dm", "@kai.agent:example.test", media=MXC_OF)
             self.assertNotIn("data:image", page)
-            self.assertEqual(page.count('<img src="mxc://'), 12)
+            self.assertEqual(page.count('<img src="mxc://'), 13)
             self.assertLess(len(page.encode("utf-8")), 40_000, core)
 
     def test_without_media_the_page_is_the_fallback_page(self):
@@ -452,7 +445,7 @@ class MarkerTest(unittest.TestCase):
 
 class SizeTest(unittest.TestCase):
     def test_every_fallback_file_is_under_the_per_asset_cap(self):
-        files = {p.name: p.stat().st_size for p in tp.ASSETS.glob("*.jpg")}
+        files = {p.name: p.stat().st_size for p in tp.ASSETS.iterdir() if p.suffix in (".jpg", ".png")}
         self.assertTrue(files)
         over = {f: n for f, n in files.items() if n > ASSET_CAP}
         self.assertEqual(over, {})

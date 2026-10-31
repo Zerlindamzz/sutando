@@ -30,14 +30,14 @@ PAGE_TITLE = "Getting started"
 NAME_MAX = 64
 CORES = ("claude", "codex", "unknown")
 CONNECT_PROMPT = "Connect my Google Calendar."
-IMPORT_PROMPT = "Import my Claude Code history."
 SCHEMA_VERSION = 1
 LIST_PATH = Path(__file__).resolve().parent.parent / "feature-list.json"  # lint-workspace-resolution: allow-repo-root
 # A revision ends in the list's date and a sequence number, so two revisions order by (date, n).
 REVISION = re.compile(r"^tutorial\.(\d{4}-\d{2}-\d{2})\.(\d+)$")
 STEP_ID = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 ASSET_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-FALLBACK_FILE = re.compile(r"^assets/([a-z0-9][a-z0-9-]*\.jpg)$")
+FALLBACK_FILE = re.compile(r"^assets/([a-z0-9][a-z0-9-]*\.(?:jpg|png))$")
+MIME = {".jpg": "image/jpeg", ".png": "image/png"}
 # Room media as room-commons' room_pdf.py accepts it from room.media.upload.
 MXC = re.compile(r"^mxc://[A-Za-z0-9][A-Za-z0-9.-]{0,253}(?::\d{1,5})?/[A-Za-z0-9_-]{1,255}$")
 RELEASE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -93,22 +93,16 @@ WHERE = {"dm": "your DM", "room": "a room"}
 ASSETS = Path(__file__).resolve().parent.parent / "assets"  # lint-workspace-resolution: allow-repo-root
 
 
-# (light, dark) per section; each passes WCAG AA (4.5:1) as text on that theme's card colour.
 CARD = ("#ffffff", "#202225")
-ACCENTS = {
-    "dm": ("#4a5a70", "#b3c2d6"),
-    "rooms": ("#1f5fcc", "#7aa7ff"),
-    "commons": ("#0b7a5c", "#4fd1a5"),
-    "teamwork": ("#7a3fc8", "#b98cff"),
-    "calls": ("#b8341e", "#ff8a73"),
-    "agents": ("#8f5600", "#f2b24c"),
-    "apps": ("#0a6f91", "#5cc8ee"),
-    "activity": ("#b0286c", "#ff7ab8"),
-    "phone": ("#3e4dc9", "#98a4ff"),
-    "mobile": ("#3e4dc9", "#98a4ff"),
-    "import": ("#566410", "#c3d65a"),
-}
-DEFAULT_ACCENT = ("#4a5a70", "#b3c2d6")  # a step the list adds before this module has art for it
+INK = "#1c1b1c"
+# The brand gradients (name, in, out), cycled over the steps in order. The icon glyph is ink on the
+# gradient, so it stays legible in both themes; the "out" shade is the card's top border.
+BRAND = (("orange", "#f9a75c", "#f26a21"), ("yellow", "#f0e24a", "#ea931f"), ("pink", "#f8cbfb", "#f38c64"))
+
+
+def accent(index: int) -> str:
+    """The brand gradient a step's card and icon use: orange, yellow, pink, then again."""
+    return BRAND[index % len(BRAND)][0]
 
 _S = 'fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"'
 ICONS = {
@@ -142,8 +136,6 @@ ICONS = {
               f'<path {_S} d="M24 16h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-9l-5 4v-4h-2a2 2 0 0 1-2-2V18a2 2 0 0 1 2-2z"/>',
     "phone": f'<rect {_S} x="18" y="4" width="28" height="56" rx="6"/><path {_S} d="M28 52h8"/>'
                   f'<path {_S} d="M32 14v22M24 28l8 8 8-8"/>',
-    "import": f'<path {_S} d="M6 22a4 4 0 0 1 4-4h12l5 5h27a4 4 0 0 1 4 4v24a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4z"/>'
-              f'<path {_S} d="M32 4v26M24 22l8 8 8-8"/>',
 }
 DEFAULT_ICON = f'<path {_S} d="M32 6l6 16 16 6-16 6-6 16-6-16-16-6 16-6z"/>'
 
@@ -239,7 +231,7 @@ def _step(raw: object, n: int, assets: Path) -> Section:
             raise ValueError(f"{at}: asset must be a bare lowercase name, got {asset!r}")
         m = FALLBACK_FILE.match(fallback) if isinstance(fallback, str) else None
         if not m:
-            raise ValueError(f"{at}: fallback_file must be assets/<name>.jpg, got {fallback!r}")
+            raise ValueError(f"{at}: fallback_file must be assets/<name>.jpg or .png, got {fallback!r}")
         if not isinstance(alt, str) or not alt.strip():
             raise ValueError(f"{at}: alt text is required")
         if not (assets / m.group(1)).is_file():
@@ -356,7 +348,7 @@ def prompt_slots(features: FeatureList) -> Tuple[str, ...]:
 
 def sections_for(core: str, features: Optional[FeatureList] = None) -> List[Section]:
     """The page's sections: every step of the list that names no runtime, plus those naming this
-    core (the Claude Code import step only on a Claude Code core)."""
+    core."""
     if core not in CORES:
         raise ValueError(f"core must be one of {', '.join(CORES)}, got {core!r}")
     return [s for s in (features or FEATURES).steps if s.runtime in (None, core)]
@@ -376,7 +368,8 @@ def contrast(a: str, b: str) -> float:
 
 
 def _data_uri(filename: str) -> str:
-    return "data:image/jpeg;base64," + base64.b64encode((ASSETS / filename).read_bytes()).decode("ascii")
+    mime = MIME[Path(filename).suffix]
+    return f"data:{mime};base64," + base64.b64encode((ASSETS / filename).read_bytes()).decode("ascii")
 
 
 def _prompt(key: str, prompt: str, where: Optional[str]) -> str:
@@ -433,12 +426,13 @@ def role_labels(roles: object) -> List[str]:
     return list(out.values())[:ROLES_MAX]
 
 
-def _section(sec: Section, first: bool, who: str, prompts: Dict[str, str], media: Dict[str, str]) -> str:
+def _section(sec: Section, index: int, who: str, prompts: Dict[str, str], media: Dict[str, str]) -> str:
     prompt = _prompt(sec.id, prompts.get(sec.id, sec.prompt), sec.where) if sec.prompt else ""
     icon = ICONS.get(sec.id, DEFAULT_ICON)
+    tone = accent(index)
     return (
-        f'<section class="sec card{" cur" if first else ""}" id="s-{sec.id}" data-id="{sec.id}" '
-        f'aria-labelledby="h-{sec.id}" style="--accent:var(--a-{sec.id})">'
+        f'<section class="sec card{" cur" if index == 0 else ""}" id="s-{sec.id}" data-id="{sec.id}" '
+        f'aria-labelledby="h-{sec.id}" style="--accent-in:var(--{tone}-in);--accent-out:var(--{tone}-out)">'
         f'<div class="icon" aria-hidden="true"><svg viewBox="0 0 64 64" focusable="false">{icon}</svg></div>'
         f'<div class="body"><h2 id="h-{sec.id}">{sec.title.format(name=who)}</h2>'
         f'<p>{sec.what.format(name=who)}</p><p class="how">{sec.how.format(name=who)}</p>{prompt}'
@@ -450,25 +444,17 @@ def _section(sec: Section, first: bool, who: str, prompts: Dict[str, str], media
 
 def _finale(who: str, prompts: Dict[str, str]) -> str:
     return (
-        '<section class="card finale" id="finale" aria-labelledby="h-finale" hidden '
-        'style="--accent:var(--brand)"><div class="body">'
+        '<section class="card finale" id="finale" aria-labelledby="h-finale" hidden>'
+        '<div class="body">'
         f'<h2 id="h-finale" tabindex="-1">You&rsquo;re set. Ask {who} anything</h2>'
         f'<p class="how">That was the whole tour. Start with something real:</p>'
         f'{_prompt("finale", prompts.get("finale", FINALE_PROMPT), "dm")}</div></section>'
     )
 
 
-def _palette(extra: Tuple[str, ...] = ()) -> tuple:
-    """The accent variables: one per known step, then `extra` (step ids without their own accent)
-    on the default accent."""
-    light = "".join(f"--a-{k}:{v[0]};" for k, v in ACCENTS.items())
-    light += "".join(f"--a-{k}:{DEFAULT_ACCENT[0]};" for k in extra)
-    dark = ("--bg:#151618; --fg:#ececec; --muted:#a9adb3; --card:#202225; --line:#34373b; --brand:#f9a75c; "
-            "--code:#2b2d31; --hero-ring:#2d2520; --track:#34373b; --pill-bg:#ececec; --pill-fg:#1c1b1c; "
-            "--shadow:0 0 0 1px #34373b; --orb-alpha:.28; "
-            + "".join(f"--a-{k}:{v[1]};" for k, v in ACCENTS.items())
-            + "".join(f"--a-{k}:{DEFAULT_ACCENT[1]};" for k in extra))
-    return light, dark
+DARK = ("--bg:#151618; --fg:#ececec; --muted:#a9adb3; --card:#202225; --line:#34373b; --brand:#f9a75c; "
+        "--code:#2b2d31; --hero-ring:#2d2520; --track:#34373b; --pill-bg:#ececec; --pill-fg:#1c1b1c; "
+        "--shadow:0 0 0 1px #34373b; --orb-alpha:.28;")
 
 
 STYLE = """<style>
@@ -478,8 +464,7 @@ STYLE = """<style>
   --pink-in:#f8cbfb; --pink-out:#f38c64; --pill-bg:var(--ink); --pill-fg:#ffffff;
   --shadow:0 1px 2px rgba(28,27,28,.04), 0 12px 32px rgba(28,27,28,.06); --orb-alpha:.5;
   --sans:"Haas Recast", "Haas Recast Dense", "Haas Recast Open", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-  --display:"Avantt", "Avantt SemiBold", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-  %(light)s }
+  --display:"Avantt", "Avantt SemiBold", "Avenir Next", "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { %(darkvars)s }
 }
@@ -492,7 +477,7 @@ main { max-width:780px; margin:0 auto; padding:28px 16px 56px; }
   background:var(--card); border-radius:26px; padding:28px 24px; box-shadow:var(--shadow); }
 .hero::before, .hero::after { content:""; position:absolute; z-index:-1; border-radius:50%%; pointer-events:none; opacity:var(--orb-alpha);
   animation:drift 16s ease-in-out infinite alternate; }
-.hero::before { width:220px; height:320px; right:-120px; top:-170px; transform:rotate(36deg);
+.hero::before { width:220px; height:320px; right:-120px; top:-170px; transform:rotate(36deg); opacity:1;
   background:radial-gradient(closest-side, var(--orange-in) 42%%, var(--orange-out) 100%%); }
 .hero::after { width:130px; height:190px; right:70px; bottom:-160px; transform:rotate(40deg); animation-duration:19s; animation-delay:-7s;
   background:radial-gradient(closest-side, var(--pink-in) 40%%, var(--pink-out) 100%%); }
@@ -521,9 +506,9 @@ p { margin:0 0 6px; }
 .dot[aria-current="step"] { border:2px solid var(--fg); color:var(--fg); }
 .dot.is-done, .dot.is-done:hover:not(:disabled) { background:radial-gradient(closest-side, var(--orange-in) 70%%, var(--orange-out) 130%%); border-color:transparent; color:var(--ink); }
 .card[hidden] { display:none; }
-.card { background:var(--card); border:1px solid transparent; border-top:4px solid var(--accent); border-radius:26px; padding:24px; margin:0 0 14px; display:flex; gap:20px; box-shadow:var(--shadow); }
-.icon { flex:none; width:72px; height:72px; border-radius:20px; color:var(--accent); position:relative; display:grid; place-items:center; }
-.icon::before { content:""; position:absolute; inset:0; border-radius:inherit; background:currentColor; opacity:.1; }
+.card { background:var(--card); border:1px solid transparent; border-top:4px solid var(--accent-out, var(--brand)); border-radius:26px; padding:24px; margin:0 0 14px; display:flex; gap:20px; box-shadow:var(--shadow); }
+.icon { flex:none; width:72px; height:72px; border-radius:20px; color:var(--ink); position:relative; display:grid; place-items:center;
+  background:radial-gradient(closest-side, var(--accent-in) 70%%, var(--accent-out) 130%%); }
 .icon svg { width:50px; height:50px; position:relative; }
 .body { min-width:0; flex:1; }
 .step-title { flex-basis:100%%; margin:2px 0 0; font-weight:500; }
@@ -811,12 +796,11 @@ def render_page(name: str, core: str = "unknown", audience: str = "dm", agent: O
     lead = (f"A quick tour with your personal native agent, {who}. Try one thing in each part."
             if audience == "dm" else "A quick tour. Try one thing in each part.")
     secs = sections_for(core, features)
-    body = "".join(_section(s, i == 0, who, prompts, media) for i, s in enumerate(secs))
-    light, dark = _palette(tuple(s.id for s in features.steps if s.id not in ACCENTS))
+    body = "".join(_section(s, i, who, prompts, media) for i, s in enumerate(secs))
     page = (
         f"{PAGE_HEAD}"
         f"{owner_marker(agent, features.revision, DIGEST_SLOT) if agent else ''}"
-        f"<title>{PAGE_TITLE}</title>{HEAD_SCRIPT}{STYLE % {'light': light, 'darkvars': dark}}</head><body>"
+        f"<title>{PAGE_TITLE}</title>{HEAD_SCRIPT}{STYLE % {'darkvars': DARK}}</head><body>"
         "<main id=\"tour\" data-mode=\"step\">"
         f"<header class=\"hero\">{HERO}<div><h1>Getting started with {who}</h1>"
         f"<p class=\"lead\">{lead}</p>{picked}</div></header>"

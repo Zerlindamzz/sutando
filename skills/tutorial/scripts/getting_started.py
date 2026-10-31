@@ -19,8 +19,8 @@
           an unexpected error included, leaves the others refreshed.
 
 The page (tour_page.py) is a short interactive AG2 Space tour rendered from the skill's feature
-list (feature-list.json: nine steps for every core, plus the Claude Code history import step when
-the core is Claude Code; `--core auto` asks the engine's config resolver, unknown omits it).
+list (feature-list.json: ten steps for every core; a step naming a `runtime` shows only on that
+core, `--core auto` asks the engine's config resolver, unknown omits such steps).
 `--list` renders from another list instead, a file or an https URL (the backend's served list,
 once it exists); a list that cannot be read or does not validate is reported on stderr and the
 skill's own file is used. Nothing is fetched unless --list names a URL. `--name auto` uses this
@@ -99,7 +99,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tour_page  # noqa: E402,F401
 from tour_page import (  # noqa: E402,F401  (the page lives in tour_page; these names are this CLI's API)
-    AUDIENCES, CONNECT_PROMPT, PROMPT_SLOTS, clean_prompts, owner_marker, CORES, IMPORT_PROMPT, NAME_MAX, PAGE_TITLE, SECTIONS, clean_name,
+    AUDIENCES, CONNECT_PROMPT, PROMPT_SLOTS, clean_prompts, owner_marker, CORES, NAME_MAX, PAGE_TITLE, SECTIONS, clean_name,
     render_page, sections_for, FeatureList, LIST_PATH, clean_media, load_list, newer, parse_list, read_marker,
     role_labels, LIST_MAX_BYTES, read_regular, page_digest_ok, page_shape_ok, strip_digest,
 )
@@ -1073,7 +1073,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "\"your agent\"")
     _personal_args(r)
     r.add_argument("--core", choices=CORES + ("auto",), default="unknown",
-                   help="the Sutando core; claude adds the Claude Code import section")
+                   help="the Sutando core; a step naming a runtime shows only on that core")
     p = sub.add_parser("plan", help="what publish would do in this room, from the marker alone")
     p.add_argument("--room", required=True)
     u = sub.add_parser("publish", help="create the page in this room, or refresh the one already there")
@@ -1084,8 +1084,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     u.add_argument("--agent-mxid", help="with --name auto: this agent's mxid")
     u.add_argument("--owner", help="the owner's mxid; summoned to the page when it is created")
     u.add_argument("--core", choices=CORES + ("auto",), default="auto",
-                   help="the Sutando core (default auto: what the engine resolves); claude adds the "
-                        "Claude Code import section, unknown leaves it out")
+                   help="the Sutando core (default auto: what the engine resolves); a step naming a "
+                        "runtime shows only on that core, unknown leaves such steps out")
     u.add_argument("--audience", choices=AUDIENCES, default=None,
                    help="dm: the owner's DM; room: any other room, where the page says \"your agent\" "
                         "(default: the audience recorded for the room, else dm)")

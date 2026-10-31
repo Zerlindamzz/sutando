@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": "tutorial.2026-10-30.1",
+  "revision": "tutorial.2026-10-30.2",
   "steps": [
     {
       "id": "dm",
@@ -170,10 +170,16 @@
       "title": "Get the mobile app",
       "body": [
         "Take your rooms and agents with you: first, put the app on your phone.",
-        "Download the mobile app from your phone&rsquo;s app store and open it. You pair it with this computer in the next step."
+        "Search &ldquo;S&rdquo; in your phone&rsquo;s app store, install the app with this icon and open it. You pair it with this computer in the next step."
       ],
       "surface": "mobile",
-      "screenshot": null,
+      "screenshot": [
+        {
+          "asset": "app-icon",
+          "fallback_file": "assets/app-icon.png",
+          "alt": "The S app icon"
+        }
+      ],
       "since_release": "2026-10-30"
     },
     {
@@ -192,22 +198,6 @@
         }
       ],
       "since_release": "2026-10-15"
-    },
-    {
-      "id": "import",
-      "title": "Import your Claude Code history",
-      "body": [
-        "If you use Claude Code, {name} can read your local Claude Code history and bring what you worked on into its memory. You see a digest first; nothing is kept until you say so.",
-        "Ask {name}:"
-      ],
-      "surface": "dm",
-      "screenshot": null,
-      "since_release": "2026-10-15",
-      "paste": "Import my Claude Code history.",
-      "runtime": "claude",
-      "watches": [
-        "skills/import-claude-context/"
-      ]
     }
   ]
 }
