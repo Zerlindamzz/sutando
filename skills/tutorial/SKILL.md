@@ -74,8 +74,8 @@ not retry the page in the same turn.
    publishing in its own `room`. A missing or malformed file, or a field of the wrong shape, is
    ignored; with no `--room` and no usable saved room, the script exits 2.
 
-   Before rendering, `publish` uploads the screenshots' full-resolution captures to the room's
-   media (see "Screenshots are Commons asset references" below) and reports it in the result's
+   Before it writes the page, `publish` uploads the screenshots' full-resolution captures to the
+   room's media (see "Screenshots are Commons asset references" below) and reports it in the result's
    `upload`: `uploaded`, `skipped` (already in the room at the same hash, or mapped by `--media`),
    `fallback` (inlined instead) and `reason`. An encrypted room gets the inlined page; that is
    expected, not an error. `--no-upload` uploads nothing.
@@ -261,7 +261,8 @@ resolves such an address for the viewer (`RoomHtmlView.tsx` with `htmlAssets.ts`
 host for each `mxc://` its source names, and the host answers with an authenticated media URL), so
 an uploaded image never expires and needs no public link.
 
-`publish` does the upload itself, before it renders, in the room it publishes to:
+`publish` does the upload itself, in the room it publishes to, once it knows it will write the
+page: a run that skips, keeps an edited page or stops on the page's size uploads nothing.
 1. It checks the room is not end-to-end encrypted (room-commons' `room_media.py`
    `require_plain_room`, from `room.media.list`): an agent's upload there would sit in plaintext. An
    encrypted room, or one whose encryption cannot be read, gets no upload at all.

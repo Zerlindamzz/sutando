@@ -1777,6 +1777,44 @@ class UploadTest(_Cli):
         self.assertEqual((code, json.loads(out)["action"], len(fake.uploads)), (0, "kept", uploaded))
         self.assertEqual(sorted(self.entry()["media"]), sorted(self.HD))
 
+    def test_a_run_that_writes_no_page_uploads_nothing(self):
+        fake = self.with_media(FakeMedia())
+        marker = gs.marker_path(self.tmp / "ws")
+        # A creation whose create never answered, met by a refresh: the explicit publish's to finish.
+        page = tp.render_page("Blue", "codex", "dm", self.ME)
+        gs.save_marker(marker, {self.ROOM: {"state": "creating", "operation_id": "op-2", "target": page, "before": "",
+                                            "source": gs.content_hash(""), "hash": gs.content_hash(page), "done": 0,
+                                            "mode": "fill", "kind": None}})
+        code, out, _ = self.publish("--if-newer")
+        got = json.loads(out)
+        self.assertEqual((code, got["action"], got["reason"]), (0, "skipped", "creation pending"))
+        self.assertEqual((fake.uploads, fake.checks), ([], 0))
+        marker.unlink()
+        self.publish("--no-upload")
+        mine = self.page_text()
+        # Too large for one call: refused as before, and before anything went up.
+        with mock.patch.object(gs, "call_budget", return_value=(1_000, 2_000)):
+            code, out, _ = self.publish("--name", "Kai")
+        got = json.loads(out)
+        self.assertEqual((code, got["ok"], self.page_text()), (4, False, mine))
+        self.assertIn("left as is, not rewritten in pieces", got["reason"])
+        self.assertEqual((fake.uploads, fake.checks), ([], 0))
+        # Edited by the owner since: kept, and nothing goes up for a page that is not rewritten.
+        db = json.loads((self.tmp / "room.json").read_text())
+        db["pages"]["html-p1"] = theirs = mine + "<p>OWNER NOTES</p>"
+        (self.tmp / "room.json").write_text(json.dumps(db))
+        code, out, _ = self.publish("--name", "Kai")
+        got = json.loads(out)
+        self.assertEqual((code, got["action"], self.page_text()), (0, "kept", theirs))
+        self.assertEqual((fake.uploads, fake.checks), ([], 0))
+        # The same run on the page as written uploads, then rewrites.
+        db["pages"]["html-p1"] = mine
+        (self.tmp / "room.json").write_text(json.dumps(db))
+        code, out, _ = self.publish("--name", "Kai")
+        got = json.loads(out)
+        self.assertEqual((code, got["action"], len(got["upload"]["uploaded"])), (0, "updated", 13))
+        self.assertEqual(self.page_text().count('<img src="mxc://'), 13)
+
     def test_no_upload_and_explicit_media(self):
         fake = self.with_media(FakeMedia())
         code, out, _ = self.publish("--no-upload")

@@ -28,7 +28,7 @@ skill's own file is used. Nothing is fetched unless --list names a URL. `--name 
 agent's Matrix profile displayname, else a name made from its mxid's localpart, else "Sutando";
 it never fails.
 
-Each screenshot in the list is an asset reference. Before rendering, `publish` uploads each
+Each screenshot in the list is an asset reference. Before writing the page, `publish` uploads each
 screenshot's full-resolution `hd_file` to the room's media (room.media.upload, unposted, with an
 operation id derived from the room and the file's sha256, so a retry replays rather than re-adds)
 and points the page at the returned mxc; the room's entry records {asset: {mxc, sha256}} and a
@@ -930,12 +930,18 @@ def publish(commons: Commons, marker: Path, name: str, owner: Optional[str] = No
         # A refresh of a room whose record is current writes nothing, so it uploads nothing either.
         current = (if_newer and known.get("state") == "complete" and bool(known.get("revision"))
                    and not newer(features.revision, known["revision"]))
-        record, uploads = upload_media(commons, features, rooms.get(commons.room, {}).get("media"), media,
-                                       None if upload and not current else
-                                       "--no-upload" if not upload else "record current")
-        media = clean_media(record, features)
-        page = render_page(name, core, audience, agent, prompts, roles, features, media)
-        entry = _entry(None, page, features, prompts, roles, record, audience)
+        no_upload = "--no-upload" if not upload else "record current" if current else None
+        recorded, explicit = known.get("media"), media
+
+        def render(skip: Optional[str]) -> tuple:
+            """(record, upload report, media shown, page); uploads only when `skip` is None."""
+            record, report = upload_media(commons, features, recorded, explicit, skip)
+            shown = clean_media(record, features)
+            return record, report, shown, render_page(name, core, audience, agent, prompts, roles, features, shown)
+
+        # Until a page is about to be written it is rendered from the media already recorded or
+        # given: a run that skips, keeps the page or stops on its size uploads nothing.
+        record, uploads, media, page = render(no_upload or "no page write")
         pages = commons.listed_pages()
         step = plan(rooms, commons.room, pages)
         if if_newer and step["action"] == "resume":
@@ -963,6 +969,8 @@ def publish(commons: Commons, marker: Path, name: str, owner: Optional[str] = No
             return skipped("page deleted" if known or had_entry else "no page")
         kind = step["kind"]
         if step["action"] in ("create", "resume"):
+            record, uploads, media, page = render(no_upload)
+            entry = _entry(None, page, features, prompts, roles, record, audience)
             op = step.get("operation_id") or f"tutorial-{uuid.uuid4().hex}"
             first, earlier = chunks(page, piece_limit(commons.env))[0], rooms.get(commons.room, {}).get("before")
             journal = _journal(entry, first, page, None, name, core, audience, agent, mode="fill")
@@ -995,11 +1003,15 @@ def publish(commons: Commons, marker: Path, name: str, owner: Optional[str] = No
             page_revision = was[1] if was else None
             known = rooms.get(commons.room, {})
             written = None if known.get("foreign") or step["pending"] else known.get("hash")
+            mine = bool(written) and content_hash(current) == written
+            gated = if_newer and not upgrade and not newer(features.revision, page_revision)
+            if mine and not gated and not unplaced and rewritable(current, "", commons.env):
+                record, uploads, media, page = render(no_upload)  # a rewrite may follow: upload now
             if current == page:
                 action = "unchanged"
-            elif not written or content_hash(current) != written:
+            elif not mine:
                 action = "kept"  # a page this script cannot vouch for, or edited since: theirs stays
-            elif if_newer and not upgrade and not newer(features.revision, page_revision):
+            elif gated:
                 action = "unchanged"
             elif unplaced:
                 return skipped("audience unknown")
@@ -1008,9 +1020,9 @@ def publish(commons: Commons, marker: Path, name: str, owner: Optional[str] = No
             else:
                 # Every call of the rewrite checks the page it expects and is read back; a run cut
                 # short finishes or stands aside from the call the journal recorded.
+                entry = _entry(kind, page, features, prompts, roles, record, audience)
                 _record(marker, rooms, commons.room,
-                        _journal({**entry, "kind": kind}, current, page, known, name, core, audience, agent,
-                                 env=commons.env))
+                        _journal(entry, current, page, known, name, core, audience, agent, env=commons.env))
                 action = "updated" if _advance(commons, marker, rooms, commons.room) == "finished" else "kept"
         # A page equal to this run's render records its inputs (a revision-only bump catches up);
         # a gated unchanged or kept run records nothing: inputs that were not applied stay out.
