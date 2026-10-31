@@ -325,7 +325,7 @@ page's, while every fallback file stays under the caps above.
 - Copy outcomes are announced in a live status region. Animations stop under
   `prefers-reduced-motion`. Without scripts, every step shows.
 
-**Size.** With every screenshot inlined (no upload) the page is about 235 KB (capped at 300 KB), over the 196,608
+**Size.** With every screenshot inlined (no upload) the page is about 250 KB (capped at 300 KB), over the 196,608
 bytes Room Commons takes in one write. The first piece goes in the create's own body; the rest are appended in pieces
 of at most 120,000 bytes (`CHUNK_BYTES`). Arguments reach `room_commons.py` as JSON in a 0600 file,
 never argv, so Linux's 131,072-byte cap on one argument does not apply. A refresh is one `replace` when the old and new

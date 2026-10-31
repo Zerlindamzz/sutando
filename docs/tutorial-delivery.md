@@ -67,10 +67,13 @@ The procedure lives in the `tutorial` skill: [`skills/tutorial/SKILL.md`](../ski
   full-resolution `hd_file` to the room's media (`room.media.upload`, an operation id per room and
   file hash, never in an encrypted room), records `{asset: {mxc, sha256}}` and re-uploads only a
   changed file; the page points at that `mxc://` (or one from `--media`) and inlines the bundled
-  fallback file for any asset that did not go up. Every page variant stays under 300 KB.
+  fallback file for any asset that did not go up. It uploads only once it will write the page: a
+  run that skips, keeps an edited page or stops on the page's size uploads nothing. Every page
+  variant stays under 300 KB.
 
-Last verified: 2026-10-24, against `tests/tutorial-feature-list.test.py` and
-`tests/tutorial-getting-started.test.py` at the head that introduced the feature list. The live
-Room Commons round trip of `publish --if-newer` was witnessed at the previous head; the
-HTML-surface rendering of `mxc://` media was not, and the screenshot upload is covered by stubbed
-tests only.
+Last verified: 2026-10-31, against `tests/tutorial-feature-list.test.py` and
+`tests/tutorial-getting-started.test.py`. The screenshot upload and the HTML-surface rendering of
+`mxc://` media were verified live in a VM on 2026-10-30/31: a page published to a test account's
+DM uploaded all 13 assets and rendered in the desktop app 0.8.2, in Safari on the web, in dark
+mode and in a narrow panel. The live Room Commons round trip of `publish --if-newer` was witnessed
+at an earlier head.
